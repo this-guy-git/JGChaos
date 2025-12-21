@@ -25,6 +25,16 @@
 (defconstant CHAOS_INTERVAL_SEC 5.0)
 (defconstant CHAOS_DURATION_SEC 20.0)
 
+
+(defconstant CHAOS_DUR_BIG_HEAD   18.0)
+(defconstant CHAOS_DUR_SMALL_HEAD 18.0)
+(defconstant CHAOS_DUR_MIRROR     15.0)
+(defconstant CHAOS_DUR_INVINC     12.0)
+(defconstant CHAOS_DUR_NO_TEX     10.0)
+(defconstant CHAOS_DUR_ECO_BLUE   18.0)
+(defconstant CHAOS_DUR_ECO_RED    18.0)
+
+
 (define *chaos-enabled?* #t)
 (define *chaos-active* #f)
 (define *chaos-end-frame* 0)
@@ -56,6 +66,17 @@
       ((5) 'eco-blue)
       (else 'eco-red))))
 
+(defun chaos-effect-duration ((effect symbol))
+  (case effect
+    (('big-head)   CHAOS_DUR_BIG_HEAD)
+    (('small-head) CHAOS_DUR_SMALL_HEAD)
+    (('mirror)     CHAOS_DUR_MIRROR)
+    (('invinc)     CHAOS_DUR_INVINC)
+    (('no-tex)     CHAOS_DUR_NO_TEX)
+    (('eco-blue)   CHAOS_DUR_ECO_BLUE)
+    (('eco-red)    CHAOS_DUR_ECO_RED)
+    (else CHAOS_DURATION_SEC)))
+
 (defun chaos-start-effect ((effect symbol) (frame int))
   (chaos-clear-cheats)
   (case effect
@@ -68,7 +89,7 @@
     (('eco-red) (chaos-apply-cheat (pc-cheats eco-red)))
     )
   (set! *chaos-active* effect)
-  (set! *chaos-end-frame* (+ frame (chaos-seconds->frames CHAOS_DURATION_SEC)))
+  (set! *chaos-end-frame* (+ frame (chaos-seconds->frames (chaos-effect-duration effect))))
   0)
 
 (defun chaos-schedule-next ((frame int))
