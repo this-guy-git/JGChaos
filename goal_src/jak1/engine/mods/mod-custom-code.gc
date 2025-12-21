@@ -21,17 +21,95 @@
 ;; Begin function defintions.
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+;; Lightweight chaos system: periodic random effects using PC cheats.
+(defconstant CHAOS_INTERVAL_SEC 5.0)
+(defconstant CHAOS_DURATION_SEC 20.0)
+
+(define *chaos-enabled?* #t)
+(define *chaos-active* #f)
+(define *chaos-end-frame* 0)
+(define *chaos-next-frame* 0)
+(define *chaos-cheat-mask* (pc-cheats))
+
+(defun chaos-seconds->frames ((sec float))
+  (the int (* sec (the float TICKS_PER_SECOND))))
+
+(defun chaos-clear-cheats ()
+  (when (nonzero? *chaos-cheat-mask*)
+    (logclear! (-> *pc-settings* cheats) *chaos-cheat-mask*)
+    (set! *chaos-cheat-mask* (pc-cheats)))
+  0)
+
+(defun chaos-apply-cheat ((mask pc-cheats))
+  (logior! (-> *pc-settings* cheats) mask)
+  (logior! *chaos-cheat-mask* mask)
+  0)
+
+(defun chaos-pick-effect ()
+  (let ((roll (rand-vu-int-range 0 6)))
+    (case roll
+      ((0) 'big-head)
+      ((1) 'small-head)
+      ((2) 'mirror)
+      ((3) 'invinc)
+      ((4) 'no-tex)
+      ((5) 'eco-blue)
+      (else 'eco-red))))
+
+(defun chaos-start-effect ((effect symbol) (frame int))
+  (chaos-clear-cheats)
+  (case effect
+    (('big-head) (chaos-apply-cheat (pc-cheats big-head)))
+    (('small-head) (chaos-apply-cheat (pc-cheats small-head)))
+    (('mirror) (chaos-apply-cheat (pc-cheats mirror)))
+    (('invinc) (chaos-apply-cheat (pc-cheats invinc)))
+    (('no-tex) (chaos-apply-cheat (pc-cheats no-tex)))
+    (('eco-blue) (chaos-apply-cheat (pc-cheats eco-blue)))
+    (('eco-red) (chaos-apply-cheat (pc-cheats eco-red)))
+    )
+  (set! *chaos-active* effect)
+  (set! *chaos-end-frame* (+ frame (chaos-seconds->frames CHAOS_DURATION_SEC)))
+  0)
+
+(defun chaos-schedule-next ((frame int))
+  (set! *chaos-next-frame* (+ frame (chaos-seconds->frames CHAOS_INTERVAL_SEC)))
+  0)
+
+(defun chaos-update ((ticks int))
+  (when (= *chaos-next-frame* 0)
+    (chaos-schedule-next ticks))
+  (when (and *chaos-active* (>= ticks *chaos-end-frame*))
+    (chaos-clear-cheats)
+    (set! *chaos-active* #f))
+  (when (and *chaos-enabled?* (not *chaos-active*) (>= ticks *chaos-next-frame*))
+    (chaos-start-effect (chaos-pick-effect) ticks)
+    (chaos-schedule-next ticks))
+  0)
+
 (defun runs-every-frame ()
   ;;(increase-power-cell-by-one) This is a call to increase-power-cell-by-one defined in mod-common-functions.gc
   (if *show-input-display* (input-display-on) (input-display-off))
   ;; ensure orb-placer is spawned/killed as requested, debug menu is updated
   (when *debug-segment*
     (orb-placer-maintenance))
-  (none))
+  
+  (chaos-update (the int (-> *display* base-frame-counter)))
+  
+  (draw-timer)
+  (draw-active-effects)
+  
+  (when (cpad-pressed? 0 l3)
+    (set! *showwm* (not *showwm*)))
+  (when *showwm*
+    (draw-watermark)
+  )
+  (none)
+)
 
 (defun runs-on-orb-pickup ((parent process-tree))
   (let* ((from-cache? (and parent (type-type? (-> parent type) orb-cache-top))))
     ;; Code here runs on ANY orb pickup
+
     (when from-cache?
       ;; Code here runs only if the orb was from an orb cache
       )

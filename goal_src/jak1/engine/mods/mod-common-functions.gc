@@ -35,18 +35,74 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 ;; Define Custom Variables to use in mods
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defconstant *wm* "J1GCHAOS V0.01.0")
+(defconstant *author* "BY THIS GUY")
+
+;; took far too long to find these coords
+;; why is it like this
+(defconstant *wmposx* 300)
+(defconstant *wmposy* 190)
+
+(define *showwm* #t)
+
+(define *timetext* "TIME: ")
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Define Custom Functions to call in mods
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; add your own unique custom functions here!
+(defun draw-watermark ()
+  (when (and (= *master-mode* 'game)
+             (not (or (movie?)
+                      (< (-> *display* base-frame-counter)
+                         (-> *game-info* letterbox-time)))))
 
-;; Macros can be used more-or-less just like functions
-(defmacro current-cell-count ()
-  `(-> *game-info* fuel))
+    (let ((x *wmposx* ) (y *wmposy* ))
+      (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                   (bucket-id subtitle))
+        (draw-string-xy *wm* buf x y
+          (font-color white)
+          (font-flags shadow kerning large))
+        (draw-string-xy *author* buf (+ x 150) (+ y 20)
+          (font-color white)
+          (font-flags shadow kerning))
+    )))
+)
 
-(defmacro set-current-cell-count (count)
-  `(set! (-> *game-info* fuel) ,count))
+(defun draw-timer ()
+  (let* ((x 100) (y 100)
+         (ticks (the int (-> *display* base-frame-counter)))
+         (secs-left (the int (fmax 0.0 (/ (the float (- *chaos-next-frame* ticks)) (the float TICKS_PER_SECOND)))))
+         (label (string-format "NEXT: ~d" secs-left)))
+    (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                 (bucket-id subtitle))
+      (draw-string-xy label buf x y
+        (font-color white)
+        (font-flags shadow kerning large)))))
+
+(defun draw-active-effects ()
+  (when *chaos-active*
+    (let* ((x 380) (y 100)
+           (ticks (the int (-> *display* base-frame-counter)))
+           (secs-left (the int (fmax 0.0 (/ (the float (- *chaos-end-frame* ticks)) (the float TICKS_PER_SECOND)))))
+           (name (case *chaos-active*
+                   (('big-head) "BIG HEAD")
+                   (('small-head) "SMALL HEAD")
+                   (('mirror) "MIRROR")
+                   (('invinc) "INVINCIBLE")
+                   (('no-tex) "NO TEX")
+                   (('eco-blue) "BLUE ECO")
+                   (('eco-red) "RED ECO")
+                   (else "CHAOS")))
+           (time-label (string-format "~d s" secs-left)))
+      (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                   (bucket-id subtitle))
+        (draw-string-xy name buf x y
+          (font-color white)
+          (font-flags shadow kerning large))
+        (draw-string-xy time-label buf x (+ y 18)
+          (font-color white)
+          (font-flags shadow kerning))))))
 
 (defun increase-power-cell-by-one ()
   (set-current-cell-count (+ (current-cell-count) 1))
@@ -117,7 +173,7 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
                (set-vector! (-> bounds 0) (- (meters x) radius) (meters y) (- (meters z) radius) 1.0)
                (set-vector! (-> bounds 1) (+ (meters x) radius) (meters y) (+ (meters z) radius) 1.0))))
           ((money)
-           ;; don't move orbs if being blue-eco-sucked
+           ;; don't move orbs if being eco-blue-sucked
            (when (not (logtest? (-> (the money actor) flags) (collectable-flags suck)))
              (set-vector! (-> entity-actor trans) (meters x) (meters y) (meters z) 1.0)
              (set-vector! (-> entity-actor extra trans) (meters x) (meters y) (meters z) 1.0)
