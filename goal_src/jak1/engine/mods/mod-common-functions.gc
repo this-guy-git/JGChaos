@@ -37,6 +37,8 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 
 (define-extern *chaos-active-list* pair) ;; from mod-custom-code.gc
 (define-extern *chaos-next-frame* int)
+(define-extern *chaos-enabled?* symbol)
+(define-extern *chaos-selected-effect* symbol)
 
 (defconstant *wm* "J1GCHAOS V0.01.0")
 (defconstant *author* "BY THIS GUY")
@@ -48,7 +50,263 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 
 (define *showwm* #t)
 
+(define *chaos-name-buffer* (new 'global 'string 64 (the-as string #f)))
+
 (define *timetext* "TIME: ")
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Names
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun chaos-effect-display-name ((effect symbol))
+  "Get fun display name for chaos effects"
+  (case effect
+    ;; Visual effects
+    (('big-head) "Bighead Mode")
+    (('small-head) "Tiny Brain")
+    (('huge-head) "Mega Cranium")
+    (('mirror) "Backwards World")
+    (('no-tex) "PS1 Graphics")
+    (('big-fist) "Meaty Hands")
+    (('big-head-npc) "Everyone's Smart Now")
+    (('oh-my-goodness) "Inappropriate NPCs")
+    
+    ;; Eco effects
+    (('eco-blue) "Gotta Go Fast")
+    (('eco-red) "Anger Issues")
+    (('eco-green) "Health Nut")
+    (('eco-yellow) "Zap Zap")
+    (('sidekick-blue) "Blueberry Daxter")
+    
+    ;; Gameplay effects
+    (('invinc) "God Mode")
+    (('hard-rats) "Angry Rodents")
+    (('hero-mode) "Hero Time")
+    
+    ;; Audio/Visual
+    (('tunes) "Music Shuffle")
+    (('sky) "Time Is Relative")
+    
+    ;; Instant teleports
+    (('tp-n-05) "Nudge North")
+    (('tp-s-05) "Nudge South")
+    (('tp-e-05) "Nudge East")
+    (('tp-w-05) "Nudge West")
+    (('tp-ne-05) "Nudge Northeast")
+    (('tp-nw-05) "Nudge Northwest")
+    (('tp-se-05) "Nudge Southeast")
+    (('tp-sw-05) "Nudge Southwest")
+    
+    (('tp-n-15) "Send North")
+    (('tp-s-15) "Send South")
+    (('tp-e-15) "Send East")
+    (('tp-w-15) "Send West")
+    (('tp-ne-15) "Send Northeast")
+    (('tp-nw-15) "Send Northwest")
+    (('tp-se-15) "Send Southeast")
+    (('tp-sw-15) "Send Southwest")
+    
+    (('tp-n-30) "Trip North")
+    (('tp-s-30) "Trip South")
+    (('tp-e-30) "Trip East")
+    (('tp-w-30) "Trip West")
+    (('tp-ne-30) "Trip Northeast")
+    (('tp-nw-30) "Trip Northwest")
+    (('tp-se-30) "Trip Southeast")
+    (('tp-sw-30) "Trip Southwest")
+    
+    (('tp-up-05) "Little Hop")
+    (('tp-up-15) "Big Jump")
+    (('tp-down-05) "Sinker")
+    (('tp-down-15) "Into The Void")
+    
+    (('tp-rand-05-10) "Short Trip")
+    (('tp-rand-10-20) "Random Walk")
+    (('tp-rand-20-40) "Lost Tourist")
+    (('tp-rand-40-80) "Where Am I?")
+    (('tp-rand-80-120) "Teleport Roulette")
+    (('tp-rand-120-200) "Chaos Dimension")
+    
+    ;; Orb effects
+    (('orbs-add-25) "Free Samples")
+    (('orbs-add-50) "Orb Bonus")
+    (('orbs-add-100) "Jackpot!")
+    (('orbs-add-200) "Big Payout")
+    (('orbs-add-500) "Large Money")
+    
+    (('orbs-sub-25) "Pocket Lint")
+    (('orbs-sub-50) "Impulse Purchase")
+    (('orbs-sub-100) "Bad Investment")
+    (('orbs-sub-200) "Market Crash")
+    (('orbs-sub-500) "Bankruptcy")
+    
+    (('orbs-set-0) "Broke")
+    (('orbs-double) "Double Or Nothing")
+    
+    ;; Cell effects
+    (('cells-add-1) "Free Cell")
+    (('cells-add-2) "Cell Bonus")
+    (('cells-add-3) "Triple Threat")
+    (('cells-add-5) "Cell Jackpot")
+    
+    (('cells-sub-1) "Cell Tax")
+    (('cells-sub-2) "Double Trouble")
+    (('cells-sub-3) "Cell Crisis")
+    
+    (('cells-set-0) "Reset Button")
+    (('cells-double) "Cell Mitosis")
+    (('cells-half) "Thanos Snap")
+    
+    ;; Spawn effects
+    (('spawn-orbs-5) "Orb Shower")
+    (('spawn-orbs-10) "Orb Rain")
+    (('spawn-orbs-20) "Orb Storm")
+    (('spawn-orbs-30) "Orb Hurricane")
+    (('spawn-orbs-50) "Orb Apocalypse")
+    
+    (('spawn-orbs-wide-5) "Scattered Orbs")
+    (('spawn-orbs-wide-10) "Wide Rain")
+    (('spawn-orbs-wide-20) "Orb Explosion")
+    (('spawn-orbs-wide-30) "Orb Nuke")
+    (('spawn-orbs-wide-50) "Orb Supernova")
+    
+    ;; Weather effects
+    (('weather-thunder) "Thunder & Lightning")
+    (('weather-dark) "Lights Out")
+    (('weather-rain) "Rainy Day")
+    (('weather-snow) "Winter Wonderland")
+    (('weather-default) "Nice Weather")
+    
+    ;; Time of day
+    (('tod-dawn) "Early Bird")
+    (('tod-morning) "Morning Vibes")
+    (('tod-noon) "High Noon")
+    (('tod-afternoon) "Afternoon Delight")
+    (('tod-evening) "Golden Hour")
+    (('tod-night) "Night Owl")
+    (('tod-random) "Time Warp")
+    
+    ;; Settings
+    (('hints-on) "Tutorial Mode")
+    (('hints-off) "No Hand Holding")
+    (('collision-on) "X-Ray Vision")
+    (('collision-off) "Normal Vision")
+    
+    ;; Health effects
+    (('life-full) "Full HP")
+    (('life-half) "Half Dead")
+    (('life-low) "One Hit")
+    (('life-heal-1) "Healing Factor")
+    (('life-hurt-1) "Ouch!")
+    (('life-hurt-3) "Big Owie")
+    
+    ;; Dangerous effects
+    (('kill-delay) "Death Sentence")
+    (('crash-delay) "Crash")
+    (('fake-crash) "Fake Crash")
+    (('instant-crash) "Instant Crash")
+    
+
+    ;; --- New fun effects (aliases) ---
+    (('fisheye) "Fishbowl Vision")
+    (('tilt-world) "World.exe Leaning")
+    (('camera-drift) "Drunk Cameraman")
+    (('low-fov) "Claustrophobia Mode")
+    (('ultra-fov) "Gamer Neck Breaker")
+    (('camera-shake) "Earthquake Simulator")
+    (('head-bob-max) "Bobblehead POV")
+    (('invert-depth) "Inside-Out Reality")
+    (('ghosting) "Afterimage Hell")
+    (('motion-blur-max) "Speed Kills Vision")
+    (('pixel-snap) "Minecraft Optifine Off")
+    (('chromatic-chaos) "RGB Nightmare")
+    (('ui-wobble) "Jelly HUD")
+    (('screen-pulse) "Heartbeat Display")
+    (('screen-flip-x) "Mirror Dimension")
+    (('screen-flip-y) "Upside-Down Brain")
+    (('letterbox) "Cinematic But Worse")
+    (('vhs) "Found Footage Mode")
+    (('screen-tear) "VSync Off (Regret)")
+    (('depth-fade) "Fog of Confusion")
+    (('hard-contrast) "Edge Detection IRL")
+    (('desync-camera) "Camera Lag IRL")
+    (('screen-jitter) "Broken Monitor")
+    (('zoom-pulse) "Breathing Lens")
+    (('scanlines) "CRT Suffering")
+
+    (('slippery) "Banana Peel Physics")
+    (('heavy-gravity) "Lead Boots")
+    (('low-gravity) "Moon Shoes")
+    (('random-jump) "Unscheduled Hops")
+    (('auto-spin) "Helicopter Mode")
+    (('moon-walk) "MJ Approved")
+    (('input-delay) "Lag Switch Activated")
+    (('random-turn) "Muscle Spasms")
+    (('air-control-zero) "No Thoughts, Just Falling")
+    (('slide-always) "Sock Floor")
+    (('micro-stutter) "Frame Perfect Pain")
+    (('speed-pulse) "Adrenaline Rush")
+    (('reverse-movement) "Brain Lag")
+    (('auto-roll) "Tactical Somersault")
+    (('sticky-feet) "Velcro Shoes")
+    (('momentum-boost) "Physics Forgot Me")
+    (('random-dash) "Blink Disorder")
+    (('ragdoll-lite) "Boneless Jak")
+    (('head-pull) "Neck Magnet")
+    (('gravity-waves) "Tide of Weight")
+    (('air-drift) "Invisible Wind")
+    (('auto-crouch) "Perma Sneak")
+    (('jump-lock) "Floor Is Law")
+    (('friction-zero) "Ice World")
+    (('physics-jitter) "Source Engine Moment")
+
+    (('one-hp) "Glass Bones Mode")
+    (('enemy-speed-up) "Crackhead NPCs")
+    (('enemy-slow) "Lagging Enemies")
+    (('random-damage) "Dice Roll Combat")
+    (('no-hitstun) "Pain Is Optional")
+    (('mega-hitstun) "Ragdoll City")
+    (('friendly-fire) "Trust Issues")
+    (('random-knockback) "Yeet Engine")
+    (('damage-pulse) "Heartbeat Damage")
+    (('enemy-clone) "Copy-Paste Threat")
+    (('random-weapon-power) "Mystery Gun")
+    (('heal-on-hit) "Vampiric Day")
+    (('damage-on-miss) "Skill Issue")
+    (('random-explosions) "Michael Bay Mode")
+    (('enemy-invuln-blink) "Now You See Me")
+    (('crit-only) "All Or Nothing")
+    (('no-crit) "Mid Damage Only")
+    (('stagger-chaos) "Flinch Simulator")
+    (('enemy-size-random) "Big Boy Lottery")
+    (('damage-delay) "Pain Queue")
+
+    (('pitch-random) "Helium World")
+    (('audio-delay) "Echo Chamber")
+    (('sound-swap) "Wrong SFX Pack")
+    (('mute-random) "Selective Hearing")
+    (('ui-flicker) "HUD Anxiety")
+    (('fake-achievement) "You Did Nothing!")
+    (('random-subtitles) "NPC Lies")
+    (('menu-shake) "UI Earthquake")
+    (('text-scramble) "Unreadable Reality")
+    (('fake-crash-lite) "Almost Died")
+    (('pause-spam) "Buffering…")
+    (('random-warning) "SYSTEM ALERT!!!")
+    (('music-speed-up) "Chipmunk OST")
+    (('music-slow) "Doomed Ambience")
+    (('heartbeat-sfx) "Stress Simulator")
+    (('ui-delay) "Button Regret")
+    (('fake-low-health) "Panic Mode")
+    (('fake-boss-healthbar) "Oh No…")
+    (('random-pings) "Phantom Alerts")
+    (('menu-desync) "Cursor Lost In Time")
+
+    (else (string-upcase (symbol->string effect) *chaos-name-buffer*))))
+
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Define Custom Functions to call in mods
@@ -73,45 +331,42 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 )
 
 (defun draw-timer ()
-  "Draw countdown to next chaos effect"
+  "Draw countdown to next chaos effect (or OFF if disabled)"
   (when (and (= *master-mode* 'game)
              (not (or (movie?)
                       (< (-> *display* base-frame-counter)
                          (-> *game-info* letterbox-time)))))
-    (let* ((x 100) (y 100)
+    (let* ((x 10) (y 200)
            (ticks (the int (-> *display* base-frame-counter)))
            (secs-left (the int (fmax 0.0 (/ (the float (- *chaos-next-frame* ticks)) (the float TICKS_PER_SECOND)))))
-           (label (if (> *chaos-next-frame* 0)
-                      (string-format "NEXT: ~d" secs-left)
-                      "NEXT: --")))
+           (label (cond
+                    ((not *chaos-enabled?*) "NEXT: OFF")
+                    ((> *chaos-next-frame* 0) (string-format "NEXT: ~d" secs-left))
+                    (else "NEXT: --"))))
       (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
                                    (bucket-id subtitle))
         (draw-string-xy label buf x y
           (font-color white)
           (font-flags shadow kerning large))))))
 
+(defun draw-selected-effect ()
+  "Draw currently selected effect (manual control helper)"
+  (when (and (= *master-mode* 'game)
+             (not (or (movie?)
+                      (< (-> *display* base-frame-counter)
+                         (-> *game-info* letterbox-time)))))
+    (let* ((x 100) (y 130)
+           (name (chaos-effect-display-name *chaos-selected-effect*))
+           (label (string-format "SELECT: ~s" name)))
+      (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                   (bucket-id subtitle))
+        (draw-string-xy label buf x y
+          (font-color white)
+          (font-flags shadow kerning))))))
+
 (defun chaos-effect-name ((effect symbol))
   "Get display name for effect"
-  (case effect
-    (('big-head) "BIG HEAD")
-    (('small-head) "SMALL HEAD")
-    (('mirror) "MIRROR")
-    (('invinc) "INVINCIBLE")
-    (('no-tex) "NO TEX")
-    (('eco-blue) "BLUE ECO")
-    (('eco-red) "RED ECO")
-    (('eco-green) "GREEN ECO")
-    (('eco-yellow) "YELLOW ECO")
-    (('sidekick-blue) "SIDEKICK BLUE")
-    (('tunes) "TUNES")
-    (('sky) "SKY")
-    (('big-fist) "BIG FIST")
-    (('hard-rats) "HARD RATS")
-    (('hero-mode) "HERO MODE")
-    (('huge-head) "HUGE HEAD")
-    (('big-head-npc) "BIG HEAD NPC")
-    (('oh-my-goodness) "OH MY GOODNESS")
-    (else "UNKNOWN")))
+  (string-upcase (symbol->string effect) *chaos-name-buffer*))
 
 (defun draw-active-effects ()
   "Draw all active chaos effects in a clean stacked list"
@@ -147,16 +402,16 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
       ;; Draw each active effect
       (dolist (entry *chaos-active-list*)
         (when (pair? entry)
-          ;; Handle double-nesting: if car is also a pair, unwrap twice
           (let* ((actual-pair (if (pair? (car entry)) (car entry) entry))
                  (effect (the symbol (car actual-pair)))
                  (end-frame (the int (cdr actual-pair)))
                  (remaining (- end-frame ticks))
                  (secs-left (the int (fmax 0.0 (/ (the float remaining) (the float TICKS_PER_SECOND)))))
-                 (name (chaos-effect-name effect))
-                 (time-str (string-format "~ds" secs-left))
+                 (name (chaos-effect-display-name effect))
+                 (time-str (if (= secs-left 0) "DONE" (string-format "~ds" secs-left)))
                  ;; Color based on time remaining
                  (color (cond
+                          ((= secs-left 0) (font-color white))
                           ((< secs-left 3) (font-color red))
                           ((< secs-left 7) (font-color yellow))
                           (else (font-color white)))))
@@ -529,3 +784,4 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 
 (defun spawn-money-meters ((x float) (y float) (z float) (amount float) (bob? symbol))
   (let ((vec (new 'stack-no-clear 'vector))) (set-vector-meters! vec x y z) (spawn-money vec amount bob?)))
+

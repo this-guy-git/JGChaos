@@ -1,6 +1,22 @@
 ;;-*-Lisp-*-
 (in-package goal)
 
+;; --- Chaos runtime state (must be defined before functions use it) ---
+(define *chaos-active-list* '()) ;; list of (effect . end-frame)
+(define *chaos-next-frame* 0)
+(define *chaos-startup-clear-pending?* #f) ;; set on spawn, handled in chaos-update when init is ready
+(define *chaos-cheat-mask* (pc-cheats))
+(define *chaos-pending-list* '())
+(define *chaos-fake-crash-until* 0)
+(define *chaos-fake-crash-pos* (new 'global 'vector))
+(set-vector! *chaos-fake-crash-pos* 0.0 0.0 0.0 1.0)
+(define *chaos-fake-crash-prev-mode* 'game)
+(define *chaos-fake-crash-paused?* #f)
+(define *chaos-fake-crash-prev-mask* (the-as process-mask 0))
+
+(define *chaos-last-ticks* 0) ;; updated each chaos-update; used for rescheduling after clear
+
+
 ;; name: mod-custom-code.gc
 ;; name in dgo: mod-custom-code
 ;; dgos: TODO
@@ -22,41 +38,382 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; Lightweight chaos system: periodic random effects using PC cheats with STACKING
-(defconstant CHAOS_INTERVAL_SEC 5.0)
-(defconstant CHAOS_DURATION_SEC 20.0)
+(define *chaos-interval-sec* 8)  ;; Time between new effects in seconds (adjustable)
+(defconstant CHAOS_DURATION_SEC 25.0)  ;; Default duration
 
-(defconstant CHAOS_DUR_BIG_HEAD   18.0)
-(defconstant CHAOS_DUR_SMALL_HEAD 18.0)
-(defconstant CHAOS_DUR_MIRROR     15.0)
-(defconstant CHAOS_DUR_INVINC     12.0)
-(defconstant CHAOS_DUR_NO_TEX     10.0)
-(defconstant CHAOS_DUR_ECO_BLUE   18.0)
-(defconstant CHAOS_DUR_ECO_RED    18.0)
-(defconstant CHAOS_DUR_ECO_GREEN  18.0)
-(defconstant CHAOS_DUR_ECO_YELLOW 18.0)
-(defconstant CHAOS_DUR_SIDEKICK_BLUE 22.0)
-(defconstant CHAOS_DUR_TUNES      25.0)
-(defconstant CHAOS_DUR_SKY        20.0)
-(defconstant CHAOS_DUR_BIG_FIST   16.0)
-(defconstant CHAOS_DUR_HARD_RATS  12.0)
-(defconstant CHAOS_DUR_HERO_MODE  12.0)
-(defconstant CHAOS_DUR_HUGE_HEAD  18.0)
-(defconstant CHAOS_DUR_BIG_HEAD_NPC 18.0)
-(defconstant CHAOS_DUR_OH_MY_GOODNESS 12.0)
+(defconstant CHAOS_DUR_BIG_HEAD   30.0)
+(defconstant CHAOS_DUR_SMALL_HEAD 25.0)
+(defconstant CHAOS_DUR_MIRROR     20.0)
+(defconstant CHAOS_DUR_INVINC     15.0)
+(defconstant CHAOS_DUR_NO_TEX     20.0)
+(defconstant CHAOS_DUR_ECO_BLUE   25.0)
+(defconstant CHAOS_DUR_ECO_RED    25.0)
+(defconstant CHAOS_DUR_DWEATHER   25.0)
+(defconstant CHAOS_DUR_ECO_GREEN  25.0)
+(defconstant CHAOS_DUR_ECO_YELLOW 25.0)
+(defconstant CHAOS_DUR_SIDEKICK_BLUE 35.0)
+(defconstant CHAOS_DUR_TUNES      40.0)
+(defconstant CHAOS_DUR_SKY        30.0)
+(defconstant CHAOS_DUR_BIG_FIST   25.0)
+(defconstant CHAOS_DUR_HARD_RATS  20.0)
+(defconstant CHAOS_DUR_HERO_MODE  20.0)
+(defconstant CHAOS_DUR_HUGE_HEAD  30.0)
+(defconstant CHAOS_DUR_BIG_HEAD_NPC 35.0)
+(defconstant CHAOS_DUR_OH_MY_GOODNESS 30.0)
+(defconstant CHAOS_DUR_XRAY 20.0)
+(defconstant CHAOS_DUR_ONE_SHOT 0.0)  ;; One-time effects stay visible for 5 seconds
+(defconstant CHAOS_WARN_SEC 5.0)
+(defconstant CHAOS_FAKE_CRASH_SEC 5.0)
+(defconstant CHAOS_MAX_LIST_SIZE 12)  ;; Max effects to show in list
 
-(define *chaos-enabled?* #t)
-(define *chaos-active-list* '()) ;; list of (effect . end-frame)
-(define *chaos-next-frame* 0)
-(define *chaos-cheat-mask* (pc-cheats))
+(defconstant CHAOS_MENU_INTERVAL_MIN 1)
+(defconstant CHAOS_MENU_INTERVAL_MAX 120)
+
+(defconstant CHAOS_EFFECT_COUNT 110)
+(define *chaos-effect-list* (new 'global 'boxed-array symbol CHAOS_EFFECT_COUNT))
+
+
+(define *chaos-enabled?* #f) ;; timer on/off
+(define *chaos-crash-enabled?* #t)
+(define *chaos-menu-context* (the-as debug-menu-context #f))
+(define *chaos-menu-root* (the-as debug-menu #f))
+(define *chaos-menu-effects* (the-as debug-menu #f))
+
+;; Manual control (hold L1+R1):
+;;   D-Pad Up/Down = select effect
+;;   X            = activate selected effect immediately
+;;   Square       = toggle chaos timer on/off
+;;   Circle       = clear all active effects
+(define *chaos-selected-index* 0)
+(define *chaos-selected-effect* 'big-head)
+
+(defconstant CHAOS_STARTUP_PERSIST_SEC 999999.0)
 
 (defun chaos-seconds->frames ((sec float))
   (the int (* sec (the float TICKS_PER_SECOND))))
 
+
+
+
+(defun chaos-effect-active? ((effect symbol))
+  (dolist (entry *chaos-active-list*)
+    (when (pair? entry)
+      (let* ((actual (if (pair? (car entry)) (car entry) entry)))
+        (when (eq? (the symbol (car actual)) effect)
+          (return #t)))))
+  #f)
+
+
+(defun chaos-update-selected-effect ()
+
+  (set! *chaos-selected-effect* (-> *chaos-effect-list* *chaos-selected-index*))
+  0)
+
+(defun chaos-wrap-selected-index ()
+  (while (< *chaos-selected-index* 0)
+    (set! *chaos-selected-index* (+ *chaos-selected-index* CHAOS_EFFECT_COUNT)))
+  (while (>= *chaos-selected-index* CHAOS_EFFECT_COUNT)
+    (set! *chaos-selected-index* (- *chaos-selected-index* CHAOS_EFFECT_COUNT)))
+  0)
+
+(defun chaos-menu-active? ()
+  ;; Legacy quick-select menu: require ALL buttons held: L1 + R1 + L3
+  (= (logand (cpad-hold 0) (pad-buttons l1 r1 l3)) (pad-buttons l1 r1 l3)))
+
+(defun chaos-health-max ()
+  (if *target*
+      (-> *target* fact health-max)
+      (-> *FACT-bank* health-max-default)))
+
+(defun chaos-set-life ((life float))
+  (when *target*
+    (let* ((fact (-> *target* fact))
+           (max (-> fact health-max))
+           (clamped (fmax 0.0 (fmin life max))))
+      (set! (-> fact health) clamped)
+      (set! (-> fact health-pickup-time) (seconds 0))))
+  0)
+
+(defun chaos-reset-player-state ()
+  ;; Reset player-specific state that may persist beyond cheat flags.
+  ;; Currently: restore health to max (undo kill/health effects) and clear fake-crash freeze position.
+  (when *target*
+    (chaos-set-life (chaos-health-max)))
+  (when *chaos-fake-crash-pos*
+    (set-vector! *chaos-fake-crash-pos* 0.0 0.0 0.0 1.0))
+  0)
+
+(defun chaos-force-clear-start-cheats ()
+  "Force-clear cheat bits that may persist from previous runs/saves, even if chaos didn't record them."
+  (when *pc-settings*
+    ;; These are the ones you reported showing up at game start.
+    (logclear! (-> *pc-settings* cheats) (pc-cheats eco-red eco-yellow big-fist)))
+  0)
 (defun chaos-clear-cheats ()
   (when (and *pc-settings* (nonzero? *chaos-cheat-mask*))
     (logclear! (-> *pc-settings* cheats) *chaos-cheat-mask*)
     (set! *chaos-cheat-mask* (pc-cheats)))
   0)
+
+(defun chaos-reset-visuals ()
+  "Reset visual world-state back to default/sane values."
+  (defaultWeatherTime)
+  (set-time-of-day 12.0)
+  0)
+
+(defun chaos-clear-all ()
+  "Hard clear: remove active + pending effects, reset fake-crash, clear cheats, reset visuals.
+Also reschedule the next random effect so clearing doesn't instantly trigger a new one."
+  (set! *chaos-active-list* '())
+  (set! *chaos-pending-list* '())
+  (set! *chaos-fake-crash-until* 0)
+  (when *chaos-fake-crash-paused?*
+    (set! *chaos-fake-crash-paused?* #f)
+    (when *setting-control*
+      (set! (-> *setting-control* default process-mask) *chaos-fake-crash-prev-mask*)
+      (apply-settings *setting-control*)))
+
+  ;; Clear cheat-based effects and any player/world state that can linger
+  (chaos-clear-cheats)
+  (chaos-force-clear-start-cheats)
+  (chaos-reset-player-state)
+  (chaos-reset-visuals)
+
+  ;; If chaos timer is enabled, push the next random effect into the future so clear
+  ;; doesn't immediately trigger a new one on the next tick.
+  (if *chaos-enabled?*
+      (set! *chaos-next-frame*
+            (+ *chaos-last-ticks* (the int (seconds *chaos-interval-sec*))))
+      (set! *chaos-next-frame* 0))
+  0)
+
+
+;; Clear ALL active/pending effects and restore normal gameplay state
+
+
+(set! (-> *chaos-effect-list* 0) 'big-head)
+(set! (-> *chaos-effect-list* 1) 'small-head)
+(set! (-> *chaos-effect-list* 2) 'mirror)
+(set! (-> *chaos-effect-list* 3) 'invinc)
+(set! (-> *chaos-effect-list* 4) 'no-tex)
+(set! (-> *chaos-effect-list* 5) 'eco-blue)
+(set! (-> *chaos-effect-list* 6) 'eco-red)
+(set! (-> *chaos-effect-list* 7) 'eco-green)
+(set! (-> *chaos-effect-list* 8) 'eco-yellow)
+(set! (-> *chaos-effect-list* 9) 'sidekick-blue)
+(set! (-> *chaos-effect-list* 10) 'tunes)
+(set! (-> *chaos-effect-list* 11) 'sky)
+(set! (-> *chaos-effect-list* 12) 'big-fist)
+(set! (-> *chaos-effect-list* 13) 'hard-rats)
+(set! (-> *chaos-effect-list* 14) 'hero-mode)
+(set! (-> *chaos-effect-list* 15) 'huge-head)
+(set! (-> *chaos-effect-list* 16) 'big-head-npc)
+(set! (-> *chaos-effect-list* 17) 'oh-my-goodness)
+(set! (-> *chaos-effect-list* 18) 'kill-delay)
+(set! (-> *chaos-effect-list* 19) 'crash-delay)
+(set! (-> *chaos-effect-list* 20) 'fake-crash)
+(set! (-> *chaos-effect-list* 21) 'tp-n-05)
+(set! (-> *chaos-effect-list* 22) 'tp-s-05)
+(set! (-> *chaos-effect-list* 23) 'tp-e-05)
+(set! (-> *chaos-effect-list* 24) 'tp-w-05)
+(set! (-> *chaos-effect-list* 25) 'tp-ne-05)
+(set! (-> *chaos-effect-list* 26) 'tp-nw-05)
+(set! (-> *chaos-effect-list* 27) 'tp-se-05)
+(set! (-> *chaos-effect-list* 28) 'tp-sw-05)
+(set! (-> *chaos-effect-list* 29) 'tp-n-15)
+(set! (-> *chaos-effect-list* 30) 'tp-s-15)
+(set! (-> *chaos-effect-list* 31) 'tp-e-15)
+(set! (-> *chaos-effect-list* 32) 'tp-w-15)
+(set! (-> *chaos-effect-list* 33) 'tp-ne-15)
+(set! (-> *chaos-effect-list* 34) 'tp-nw-15)
+(set! (-> *chaos-effect-list* 35) 'tp-se-15)
+(set! (-> *chaos-effect-list* 36) 'tp-sw-15)
+(set! (-> *chaos-effect-list* 37) 'tp-n-30)
+(set! (-> *chaos-effect-list* 38) 'tp-s-30)
+(set! (-> *chaos-effect-list* 39) 'tp-e-30)
+(set! (-> *chaos-effect-list* 40) 'tp-w-30)
+(set! (-> *chaos-effect-list* 41) 'tp-ne-30)
+(set! (-> *chaos-effect-list* 42) 'tp-nw-30)
+(set! (-> *chaos-effect-list* 43) 'tp-se-30)
+(set! (-> *chaos-effect-list* 44) 'tp-sw-30)
+(set! (-> *chaos-effect-list* 45) 'tp-up-05)
+(set! (-> *chaos-effect-list* 46) 'tp-up-15)
+(set! (-> *chaos-effect-list* 47) 'tp-down-05)
+(set! (-> *chaos-effect-list* 48) 'tp-down-15)
+(set! (-> *chaos-effect-list* 49) 'tp-rand-05-10)
+(set! (-> *chaos-effect-list* 50) 'tp-rand-10-20)
+(set! (-> *chaos-effect-list* 51) 'tp-rand-20-40)
+(set! (-> *chaos-effect-list* 52) 'tp-rand-40-80)
+(set! (-> *chaos-effect-list* 53) 'tp-rand-80-120)
+(set! (-> *chaos-effect-list* 54) 'tp-rand-120-200)
+(set! (-> *chaos-effect-list* 55) 'orbs-add-25)
+(set! (-> *chaos-effect-list* 56) 'orbs-add-50)
+(set! (-> *chaos-effect-list* 57) 'orbs-add-100)
+(set! (-> *chaos-effect-list* 58) 'orbs-add-200)
+(set! (-> *chaos-effect-list* 59) 'orbs-add-500)
+(set! (-> *chaos-effect-list* 60) 'orbs-sub-25)
+(set! (-> *chaos-effect-list* 61) 'orbs-sub-50)
+(set! (-> *chaos-effect-list* 62) 'orbs-sub-100)
+(set! (-> *chaos-effect-list* 63) 'orbs-sub-200)
+(set! (-> *chaos-effect-list* 64) 'orbs-sub-500)
+(set! (-> *chaos-effect-list* 65) 'orbs-set-0)
+(set! (-> *chaos-effect-list* 66) 'orbs-double)
+(set! (-> *chaos-effect-list* 67) 'cells-add-1)
+(set! (-> *chaos-effect-list* 68) 'cells-add-2)
+(set! (-> *chaos-effect-list* 69) 'cells-add-3)
+(set! (-> *chaos-effect-list* 70) 'cells-add-5)
+(set! (-> *chaos-effect-list* 71) 'cells-sub-1)
+(set! (-> *chaos-effect-list* 72) 'cells-sub-2)
+(set! (-> *chaos-effect-list* 73) 'cells-sub-3)
+(set! (-> *chaos-effect-list* 74) 'cells-set-0)
+(set! (-> *chaos-effect-list* 75) 'cells-double)
+(set! (-> *chaos-effect-list* 76) 'cells-half)
+(set! (-> *chaos-effect-list* 77) 'spawn-orbs-5)
+(set! (-> *chaos-effect-list* 78) 'spawn-orbs-10)
+(set! (-> *chaos-effect-list* 79) 'spawn-orbs-20)
+(set! (-> *chaos-effect-list* 80) 'spawn-orbs-30)
+(set! (-> *chaos-effect-list* 81) 'spawn-orbs-50)
+(set! (-> *chaos-effect-list* 82) 'spawn-orbs-wide-5)
+(set! (-> *chaos-effect-list* 83) 'spawn-orbs-wide-10)
+(set! (-> *chaos-effect-list* 84) 'spawn-orbs-wide-20)
+(set! (-> *chaos-effect-list* 85) 'spawn-orbs-wide-30)
+(set! (-> *chaos-effect-list* 86) 'spawn-orbs-wide-50)
+(set! (-> *chaos-effect-list* 87) 'weather-thunder)
+(set! (-> *chaos-effect-list* 88) 'weather-dark)
+(set! (-> *chaos-effect-list* 89) 'weather-rain)
+(set! (-> *chaos-effect-list* 90) 'weather-snow)
+(set! (-> *chaos-effect-list* 91) 'weather-default)
+(set! (-> *chaos-effect-list* 92) 'tod-dawn)
+(set! (-> *chaos-effect-list* 93) 'tod-morning)
+(set! (-> *chaos-effect-list* 94) 'tod-noon)
+(set! (-> *chaos-effect-list* 95) 'tod-afternoon)
+(set! (-> *chaos-effect-list* 96) 'tod-evening)
+(set! (-> *chaos-effect-list* 97) 'tod-night)
+(set! (-> *chaos-effect-list* 98) 'tod-random)
+(set! (-> *chaos-effect-list* 99) 'hints-on)
+(set! (-> *chaos-effect-list* 100) 'hints-off)
+(set! (-> *chaos-effect-list* 101) 'collision-on)
+(set! (-> *chaos-effect-list* 102) 'collision-off)
+(set! (-> *chaos-effect-list* 103) 'life-full)
+(set! (-> *chaos-effect-list* 104) 'life-half)
+(set! (-> *chaos-effect-list* 105) 'life-low)
+(set! (-> *chaos-effect-list* 106) 'life-heal-1)
+(set! (-> *chaos-effect-list* 107) 'life-hurt-1)
+(set! (-> *chaos-effect-list* 108) 'life-hurt-3)
+(set! (-> *chaos-effect-list* 109) 'instant-crash)
+(set! (-> *chaos-effect-list* 110) 'tp-checkpoint-rand)
+(set! (-> *chaos-effect-list* 111) 'orbs-add-10)
+(set! (-> *chaos-effect-list* 112) 'orbs-add-20)
+(set! (-> *chaos-effect-list* 113) 'orbs-add-30)
+(set! (-> *chaos-effect-list* 114) 'orbs-add-75)
+(set! (-> *chaos-effect-list* 115) 'orbs-add-150)
+(set! (-> *chaos-effect-list* 116) 'orbs-add-250)
+(set! (-> *chaos-effect-list* 117) 'orbs-add-750)
+(set! (-> *chaos-effect-list* 118) 'orbs-add-1000)
+(set! (-> *chaos-effect-list* 119) 'orbs-add-2000)
+(set! (-> *chaos-effect-list* 120) 'orbs-add-5000)
+(set! (-> *chaos-effect-list* 121) 'orbs-sub-10)
+(set! (-> *chaos-effect-list* 122) 'orbs-sub-20)
+(set! (-> *chaos-effect-list* 123) 'orbs-sub-30)
+(set! (-> *chaos-effect-list* 124) 'orbs-sub-75)
+(set! (-> *chaos-effect-list* 125) 'orbs-sub-150)
+(set! (-> *chaos-effect-list* 126) 'orbs-sub-250)
+(set! (-> *chaos-effect-list* 127) 'orbs-sub-750)
+(set! (-> *chaos-effect-list* 128) 'orbs-sub-1000)
+(set! (-> *chaos-effect-list* 129) 'orbs-sub-2000)
+(set! (-> *chaos-effect-list* 130) 'orbs-sub-5000)
+(set! (-> *chaos-effect-list* 131) 'cells-add-8)
+(set! (-> *chaos-effect-list* 132) 'cells-add-10)
+(set! (-> *chaos-effect-list* 133) 'cells-add-12)
+(set! (-> *chaos-effect-list* 134) 'cells-add-15)
+(set! (-> *chaos-effect-list* 135) 'cells-add-25)
+(set! (-> *chaos-effect-list* 136) 'cells-add-40)
+(set! (-> *chaos-effect-list* 137) 'cells-sub-8)
+(set! (-> *chaos-effect-list* 138) 'cells-sub-10)
+(set! (-> *chaos-effect-list* 139) 'cells-sub-12)
+(set! (-> *chaos-effect-list* 140) 'cells-sub-15)
+(set! (-> *chaos-effect-list* 141) 'cells-sub-25)
+(set! (-> *chaos-effect-list* 142) 'cells-sub-40)
+(set! (-> *chaos-effect-list* 143) 'spawn-orbs-6)
+(set! (-> *chaos-effect-list* 144) 'spawn-orbs-12)
+(set! (-> *chaos-effect-list* 145) 'spawn-orbs-18)
+(set! (-> *chaos-effect-list* 146) 'spawn-orbs-24)
+(set! (-> *chaos-effect-list* 147) 'spawn-orbs-40)
+(set! (-> *chaos-effect-list* 148) 'spawn-orbs-60)
+(set! (-> *chaos-effect-list* 149) 'spawn-orbs-80)
+(set! (-> *chaos-effect-list* 150) 'spawn-orbs-wide-6)
+(set! (-> *chaos-effect-list* 151) 'spawn-orbs-wide-12)
+(set! (-> *chaos-effect-list* 152) 'spawn-orbs-wide-18)
+(set! (-> *chaos-effect-list* 153) 'spawn-orbs-wide-24)
+(set! (-> *chaos-effect-list* 154) 'spawn-orbs-wide-40)
+(set! (-> *chaos-effect-list* 155) 'spawn-orbs-wide-60)
+(set! (-> *chaos-effect-list* 156) 'spawn-orbs-wide-80)
+(set! (-> *chaos-effect-list* 157) 'tp-n-45)
+(set! (-> *chaos-effect-list* 158) 'tp-s-45)
+(set! (-> *chaos-effect-list* 159) 'tp-e-45)
+(set! (-> *chaos-effect-list* 160) 'tp-w-45)
+(set! (-> *chaos-effect-list* 161) 'tp-ne-45)
+(set! (-> *chaos-effect-list* 162) 'tp-nw-45)
+(set! (-> *chaos-effect-list* 163) 'tp-se-45)
+(set! (-> *chaos-effect-list* 164) 'tp-sw-45)
+(set! (-> *chaos-effect-list* 165) 'tp-n-60)
+(set! (-> *chaos-effect-list* 166) 'tp-s-60)
+(set! (-> *chaos-effect-list* 167) 'tp-e-60)
+(set! (-> *chaos-effect-list* 168) 'tp-w-60)
+(set! (-> *chaos-effect-list* 169) 'tp-ne-60)
+(set! (-> *chaos-effect-list* 170) 'tp-nw-60)
+(set! (-> *chaos-effect-list* 171) 'tp-se-60)
+(set! (-> *chaos-effect-list* 172) 'tp-sw-60)
+(set! (-> *chaos-effect-list* 173) 'tp-n-90)
+(set! (-> *chaos-effect-list* 174) 'tp-s-90)
+(set! (-> *chaos-effect-list* 175) 'tp-e-90)
+(set! (-> *chaos-effect-list* 176) 'tp-w-90)
+(set! (-> *chaos-effect-list* 177) 'tp-up-30)
+(set! (-> *chaos-effect-list* 178) 'tp-down-30)
+(set! (-> *chaos-effect-list* 179) 'tp-up-60)
+(set! (-> *chaos-effect-list* 180) 'tp-down-60)
+(set! (-> *chaos-effect-list* 181) 'tp-up-90)
+(set! (-> *chaos-effect-list* 182) 'tp-down-90)
+(set! (-> *chaos-effect-list* 183) 'tp-rand-01-03)
+(set! (-> *chaos-effect-list* 184) 'tp-rand-03-06)
+(set! (-> *chaos-effect-list* 185) 'tp-rand-06-12)
+(set! (-> *chaos-effect-list* 186) 'tp-rand-12-25)
+(set! (-> *chaos-effect-list* 187) 'tp-rand-25-50)
+(set! (-> *chaos-effect-list* 188) 'tp-rand-50-100)
+(set! (-> *chaos-effect-list* 189) 'tp-rand-100-160)
+(set! (-> *chaos-effect-list* 190) 'tp-rand-160-260)
+(set! (-> *chaos-effect-list* 191) 'tp-rand-260-400)
+(set! (-> *chaos-effect-list* 192) 'tp-rand-400-600)
+(set! (-> *chaos-effect-list* 193) 'tp-rand-600-800)
+(set! (-> *chaos-effect-list* 194) 'tp-rand-800-1200)
+(set! (-> *chaos-effect-list* 195) 'life-heal-2)
+(set! (-> *chaos-effect-list* 196) 'life-heal-5)
+(set! (-> *chaos-effect-list* 197) 'life-heal-8)
+(set! (-> *chaos-effect-list* 198) 'life-hurt-2)
+(set! (-> *chaos-effect-list* 199) 'life-hurt-5)
+(set! (-> *chaos-effect-list* 200) 'life-hurt-8)
+(chaos-update-selected-effect)
+
+
+
+
+
+
+(defun chaos-any-visual-active? ()
+  (dolist (entry *chaos-active-list*)
+    (when (pair? entry)
+      (let* ((pe (the pair entry))
+             (use-pe (the pair (if (pair? (car pe)) (car pe) pe)))
+             (eff (the symbol (car use-pe))))
+        (when (case eff
+                (('weather-thunder 'weather-dark 'weather-rain 'weather-snow 'weather-default
+                  'tod-dawn 'tod-morning 'tod-noon 'tod-afternoon 'tod-evening 'tod-night 'tod-random) #t)
+                (else #f))
+          (return #t)))))
+  #f)
+
+
+
 
 (defun chaos-apply-cheat ((mask pc-cheats))
   (when *pc-settings*
@@ -64,31 +421,614 @@
     (logior! *chaos-cheat-mask* mask))
   0)
 
+(defun chaos-teleport-offset ((dx float) (dy float) (dz float))
+  (when *target*
+    (let ((pos (target-pos 0)))
+      (set! (-> pos x) (+ (-> pos x) (meters dx)))
+      (set! (-> pos y) (+ (-> pos y) (meters dy)))
+      (set! (-> pos z) (+ (-> pos z) (meters dz)))))
+  0)
+
+(defun chaos-teleport-random ((min-dist float) (max-dist float))
+  (let* ((angle (rand-vu-float-range 0.0 360.0))
+         (dist (rand-vu-float-range min-dist max-dist))
+         (dx (* dist (cos angle)))
+         (dz (* dist (sin angle))))
+    (chaos-teleport-offset dx 0.0 dz))
+  0)
+
+
+(defun chaos-teleport-random-checkpoint ()
+  (let ((count 0))
+    (let ((lev *level-load-list*))
+      (while (not (null? lev))
+        (let ((cont (-> (the-as level-load-info (-> (the-as symbol (car lev)) value)) continues)))
+          (while (not (null? cont))
+            (set! count (+ count 1))
+            (set! cont (cdr cont))))
+        (set! lev (cdr lev))))
+    (when (> count 0)
+      (let ((pick (rand-vu-int-range 0 (+ count -1)))
+            (idx 0)
+            (chosen (the-as level-load-info #f)))
+        (let ((lev *level-load-list*))
+          (while (and (not chosen) (not (null? lev)))
+            (let ((cont (-> (the-as level-load-info (-> (the-as symbol (car lev)) value)) continues)))
+              (while (and (not chosen) (not (null? cont)))
+                (if (= idx pick)
+                    (set! chosen (the-as level-load-info (car cont)))
+                    (set! idx (+ idx 1)))
+                (set! cont (cdr cont))))
+            (set! lev (cdr lev))))
+        (when chosen
+          (start 'play (get-continue-by-name *game-info* (symbol->string (-> chosen name)))))))
+  0))
+
+(defun chaos-spawn-money-burst ((count int) (radius float))
+  (when *target*
+    (let ((i 0)
+          (base (target-pos 0)))
+      (while (< i count)
+        (let* ((angle (rand-vu-float-range 0.0 360.0))
+               (dist (rand-vu-float-range 0.0 radius))
+               (dx (* dist (cos angle)))
+               (dz (* dist (sin angle)))
+               (pos (new 'stack-no-clear 'vector)))
+          (set-vector! pos (+ (-> base x) (meters dx)) (-> base y) (+ (-> base z) (meters dz)) 1.0)
+          (spawn-money pos 1.0 #t))
+        (+! i 1))))
+  0)
+
+(defun chaos-add-orbs ((amount float))
+  (when *game-info*
+    (set! (-> *game-info* money) (fmax 0.0 (+ (-> *game-info* money) amount)))
+    (set! (-> *game-info* money-total) (fmax 0.0 (+ (-> *game-info* money-total) amount))))
+  0)
+
+(defun chaos-set-orbs ((amount float))
+  (when *game-info*
+    (set! (-> *game-info* money) (fmax 0.0 amount))
+    (set! (-> *game-info* money-total) (fmax 0.0 amount)))
+  0)
+
+(defun chaos-mul-orbs ((scale float))
+  (when *game-info*
+    (set! (-> *game-info* money) (fmax 0.0 (* (-> *game-info* money) scale)))
+    (set! (-> *game-info* money-total) (fmax 0.0 (* (-> *game-info* money-total) scale))))
+  0)
+
+(defun chaos-add-cells ((delta float))
+  (when *game-info*
+    (set-current-cell-count (fmax 0.0 (+ (current-cell-count) delta))))
+  0)
+
+(defun chaos-set-cells ((amount float))
+  (when *game-info*
+    (set-current-cell-count (fmax 0.0 amount)))
+  0)
+
+(defun chaos-mul-cells ((scale float))
+  (when *game-info*
+    (set-current-cell-count (fmax 0.0 (* (current-cell-count) scale))))
+  0)
+
+
+(defun chaos-add-life ((delta float))
+  (when *target*
+    (let* ((fact (-> *target* fact))
+           (max (-> fact health-max))
+           (cur (-> fact health))
+           (next (fmax 0.0 (fmin (+ cur delta) max))))
+      (set! (-> fact health) next)
+      (set! (-> fact health-pickup-time) (seconds 0))))
+  0)
+
+(defun chaos-do-kill ()
+  (when *target*
+    (send-event *target* 'attack-invinc #f (static-attack-info ((mode 'instant-death)))))
+  0)
+
+
+(defun chaos-do-crash ()
+  (when *chaos-crash-enabled?*
+    (format 0 "CHAOS CRASH~%")
+    (set! (-> (the (pointer int) 0) 0) #x1337))
+  0)
+
+(defun chaos-schedule-delayed ((effect symbol) (frame int) (delay-sec float))
+  (let ((trigger (+ frame (chaos-seconds->frames delay-sec))))
+    (set! *chaos-pending-list* (cons (cons effect trigger) *chaos-pending-list*)))
+  0)
+
+(defun chaos-run-pending ((ticks int))
+  (let ((new-list '()))
+    (dolist (entry *chaos-pending-list*)
+      (when (pair? entry)
+        (let* ((pe (the pair entry))
+               (eff (the symbol (car pe)))
+               (trigger (the int (cdr pe))))
+          (if (>= ticks trigger)
+              (case eff
+                (('kill-delay) (chaos-do-kill))
+                (('crash-delay) (chaos-do-crash))
+                (else 0))
+              (set! new-list (cons pe new-list))))))
+    (set! *chaos-pending-list* new-list))
+  0)
+
+(defun chaos-start-fake-crash ((frame int))
+  (set! *chaos-fake-crash-until* (+ frame (chaos-seconds->frames CHAOS_FAKE_CRASH_SEC)))
+  (when *setting-control*
+    (set! *chaos-fake-crash-prev-mask* (-> *setting-control* default process-mask))
+    (logior! (-> *setting-control* default process-mask) (process-mask pause))
+    (apply-settings *setting-control*))
+  (set! *chaos-fake-crash-paused?* #t)
+  (when *target*
+    (let ((p (target-pos 0)))
+      (set-vector! *chaos-fake-crash-pos* (-> p x) (-> p y) (-> p z) 1.0)))
+  0)
+
+(defun chaos-fake-crash-active? ((ticks int))
+  (< ticks *chaos-fake-crash-until*))
+
+(defun chaos-end-fake-crash ()
+  (when *chaos-fake-crash-paused?*
+    (set! *chaos-fake-crash-paused?* #f)
+    (when *setting-control*
+      (set! (-> *setting-control* default process-mask) *chaos-fake-crash-prev-mask*)
+      (apply-settings *setting-control*)))
+  0)
+
+(defun chaos-draw-fake-crash ()
+  0)
+
+(defun chaos-apply-effect ((effect symbol) (frame int))
+  (case effect
+    (('big-head)
+     ;; Jak head scale up
+     (chaos-apply-cheat (pc-cheats big-head)))
+    (('small-head)
+     ;; Jak head scale down
+     (chaos-apply-cheat (pc-cheats small-head)))
+    (('mirror)
+     ;; Mirror camera/world
+     (chaos-apply-cheat (pc-cheats mirror)))
+    (('invinc)
+     ;; Invulnerability
+     (chaos-apply-cheat (pc-cheats invinc)))
+    (('no-tex)
+     ;; Disable textures
+     (chaos-apply-cheat (pc-cheats no-tex)))
+    (('eco-blue)
+     ;; Force blue eco
+     (chaos-apply-cheat (pc-cheats eco-blue)))
+    (('eco-red)
+     ;; Force red eco
+     (chaos-apply-cheat (pc-cheats eco-red)))
+    (('eco-green)
+     ;; Force green eco
+     (chaos-apply-cheat (pc-cheats eco-green)))
+    (('eco-yellow)
+     ;; Force yellow eco
+     (chaos-apply-cheat (pc-cheats eco-yellow)))
+    (('sidekick-blue)
+     ;; Blue-tint sidekick
+     (chaos-apply-cheat (pc-cheats sidekick-blue)))
+    (('tunes)
+     ;; All music flavas
+     (chaos-apply-cheat (pc-cheats tunes)))
+    (('sky)
+     ;; Real-time sky/time-of-day
+     (chaos-apply-cheat (pc-cheats sky)))
+    (('big-fist)
+     ;; Big hands
+     (chaos-apply-cheat (pc-cheats big-fist)))
+    (('hard-rats)
+     ;; Harder rats mode
+     (chaos-apply-cheat (pc-cheats hard-rats)))
+    (('hero-mode)
+     ;; Hero mode flag
+     (chaos-apply-cheat (pc-cheats hero-mode)))
+    (('huge-head)
+     ;; Huge head scale
+     (chaos-apply-cheat (pc-cheats huge-head)))
+    (('big-head-npc)
+     ;; NPC head scale up
+     (chaos-apply-cheat (pc-cheats big-head-npc)))
+    (('oh-my-goodness)
+     ;; Comedic NPC chest scale
+     (chaos-apply-cheat (pc-cheats oh-my-goodness)))
+    (('kill-delay)
+     ;; Delayed kill warning; actual kill fires when timer expires.
+     0)
+    (('crash-delay)
+     ;; Delayed crash warning; actual crash fires when timer expires.
+     0)
+    (('instant-crash)
+    (chaos-do-crash))
+    (('fake-crash)
+     ;; Fake crash overlay
+     (chaos-start-fake-crash frame))
+    (('tp-n-05)
+     ;; Teleport offset (0.0, 0.0, 5.0)m
+     (chaos-teleport-offset 0.0 0.0 5.0))
+    (('tp-s-05)
+     ;; Teleport offset (0.0, 0.0, -5.0)m
+     (chaos-teleport-offset 0.0 0.0 -5.0))
+    (('tp-e-05)
+     ;; Teleport offset (5.0, 0.0, 0.0)m
+     (chaos-teleport-offset 5.0 0.0 0.0))
+    (('tp-w-05)
+     ;; Teleport offset (-5.0, 0.0, 0.0)m
+     (chaos-teleport-offset -5.0 0.0 0.0))
+    (('tp-ne-05)
+     ;; Teleport offset (5.0, 0.0, 5.0)m
+     (chaos-teleport-offset 5.0 0.0 5.0))
+    (('tp-nw-05)
+     ;; Teleport offset (-5.0, 0.0, 5.0)m
+     (chaos-teleport-offset -5.0 0.0 5.0))
+    (('tp-se-05)
+     ;; Teleport offset (5.0, 0.0, -5.0)m
+     (chaos-teleport-offset 5.0 0.0 -5.0))
+    (('tp-sw-05)
+     ;; Teleport offset (-5.0, 0.0, -5.0)m
+     (chaos-teleport-offset -5.0 0.0 -5.0))
+    (('tp-n-15)
+     ;; Teleport offset (0.0, 0.0, 15.0)m
+     (chaos-teleport-offset 0.0 0.0 15.0))
+    (('tp-s-15)
+     ;; Teleport offset (0.0, 0.0, -15.0)m
+     (chaos-teleport-offset 0.0 0.0 -15.0))
+    (('tp-e-15)
+     ;; Teleport offset (15.0, 0.0, 0.0)m
+     (chaos-teleport-offset 15.0 0.0 0.0))
+    (('tp-w-15)
+     ;; Teleport offset (-15.0, 0.0, 0.0)m
+     (chaos-teleport-offset -15.0 0.0 0.0))
+    (('tp-ne-15)
+     ;; Teleport offset (15.0, 0.0, 15.0)m
+     (chaos-teleport-offset 15.0 0.0 15.0))
+    (('tp-nw-15)
+     ;; Teleport offset (-15.0, 0.0, 15.0)m
+     (chaos-teleport-offset -15.0 0.0 15.0))
+    (('tp-se-15)
+     ;; Teleport offset (15.0, 0.0, -15.0)m
+     (chaos-teleport-offset 15.0 0.0 -15.0))
+    (('tp-sw-15)
+     ;; Teleport offset (-15.0, 0.0, -15.0)m
+     (chaos-teleport-offset -15.0 0.0 -15.0))
+    (('tp-n-30)
+     ;; Teleport offset (0.0, 0.0, 30.0)m
+     (chaos-teleport-offset 0.0 0.0 30.0))
+    (('tp-s-30)
+     ;; Teleport offset (0.0, 0.0, -30.0)m
+     (chaos-teleport-offset 0.0 0.0 -30.0))
+    (('tp-e-30)
+     ;; Teleport offset (30.0, 0.0, 0.0)m
+     (chaos-teleport-offset 30.0 0.0 0.0))
+    (('tp-w-30)
+     ;; Teleport offset (-30.0, 0.0, 0.0)m
+     (chaos-teleport-offset -30.0 0.0 0.0))
+    (('tp-ne-30)
+     ;; Teleport offset (30.0, 0.0, 30.0)m
+     (chaos-teleport-offset 30.0 0.0 30.0))
+    (('tp-nw-30)
+     ;; Teleport offset (-30.0, 0.0, 30.0)m
+     (chaos-teleport-offset -30.0 0.0 30.0))
+    (('tp-se-30)
+     ;; Teleport offset (30.0, 0.0, -30.0)m
+     (chaos-teleport-offset 30.0 0.0 -30.0))
+    (('tp-sw-30)
+     ;; Teleport offset (-30.0, 0.0, -30.0)m
+     (chaos-teleport-offset -30.0 0.0 -30.0))
+    (('tp-up-05)
+     ;; Teleport offset (0.0, 5.0, 0.0)m
+     (chaos-teleport-offset 0.0 5.0 0.0))
+    (('tp-up-15)
+     ;; Teleport offset (0.0, 15.0, 0.0)m
+     (chaos-teleport-offset 0.0 15.0 0.0))
+    (('tp-down-05)
+     ;; Teleport offset (0.0, -5.0, 0.0)m
+     (chaos-teleport-offset 0.0 -5.0 0.0))
+    (('tp-down-15)
+     ;; Teleport offset (0.0, -15.0, 0.0)m
+     (chaos-teleport-offset 0.0 -15.0 0.0))
+    (('tp-rand-05-10)
+     ;; Random teleport 5-10m
+     (chaos-teleport-random 5.0 10.0))
+    (('tp-rand-10-20)
+     ;; Random teleport 10-20m
+     (chaos-teleport-random 10.0 20.0))
+    (('tp-rand-20-40)
+     ;; Random teleport 20-40m
+     (chaos-teleport-random 20.0 40.0))
+    (('tp-rand-40-80)
+     ;; Random teleport 40-80m
+     (chaos-teleport-random 40.0 80.0))
+    (('tp-rand-80-120)
+     ;; Random teleport 80-120m
+     (chaos-teleport-random 80.0 120.0))
+    (('tp-rand-120-200)
+     ;; Random teleport 120-200m
+     (chaos-teleport-random 120.0 200.0))
+    (('orbs-add-25)
+     ;; ORBS ADD 25
+     (chaos-add-orbs 25.0))
+    (('orbs-add-50)
+     ;; ORBS ADD 50
+     (chaos-add-orbs 50.0))
+    (('orbs-add-100)
+     ;; ORBS ADD 100
+     (chaos-add-orbs 100.0))
+    (('orbs-add-200)
+     ;; ORBS ADD 200
+     (chaos-add-orbs 200.0))
+    (('orbs-add-500)
+     ;; ORBS ADD 500
+     (chaos-add-orbs 500.0))
+    (('orbs-sub-25)
+     ;; ORBS SUB 25
+     (chaos-add-orbs -25.0))
+    (('orbs-sub-50)
+     ;; ORBS SUB 50
+     (chaos-add-orbs -50.0))
+    (('orbs-sub-100)
+     ;; ORBS SUB 100
+     (chaos-add-orbs -100.0))
+    (('orbs-sub-200)
+     ;; ORBS SUB 200
+     (chaos-add-orbs -200.0))
+    (('orbs-sub-500)
+     ;; ORBS SUB 500
+     (chaos-add-orbs -500.0))
+    (('orbs-set-0)
+     ;; ORBS SET 0
+     (chaos-set-orbs 0.0))
+    (('orbs-double)
+     ;; ORBS DOUBLE
+     (chaos-mul-orbs 2.0))
+    (('cells-add-1)
+     ;; CELLS ADD 1
+     (chaos-add-cells 1.0))
+    (('cells-add-2)
+     ;; CELLS ADD 2
+     (chaos-add-cells 2.0))
+    (('cells-add-3)
+     ;; CELLS ADD 3
+     (chaos-add-cells 3.0))
+    (('cells-add-5)
+     ;; CELLS ADD 5
+     (chaos-add-cells 5.0))
+    (('cells-sub-1)
+     ;; CELLS SUB 1
+     (chaos-add-cells -1.0))
+    (('cells-sub-2)
+     ;; CELLS SUB 2
+     (chaos-add-cells -2.0))
+    (('cells-sub-3)
+     ;; CELLS SUB 3
+     (chaos-add-cells -3.0))
+    (('cells-set-0)
+     ;; CELLS SET 0
+     (chaos-set-cells 0.0))
+    (('cells-double)
+     ;; CELLS DOUBLE
+     (chaos-mul-cells 2.0))
+    (('cells-half)
+     ;; CELLS HALF
+     (chaos-mul-cells 0.5))
+    (('spawn-orbs-5)
+     ;; SPAWN ORBS 5
+     (chaos-spawn-money-burst 5 6.0))
+    (('spawn-orbs-10)
+     ;; SPAWN ORBS 10
+     (chaos-spawn-money-burst 10 6.0))
+    (('spawn-orbs-20)
+     ;; SPAWN ORBS 20
+     (chaos-spawn-money-burst 20 6.0))
+    (('spawn-orbs-30)
+     ;; SPAWN ORBS 30
+     (chaos-spawn-money-burst 30 6.0))
+    (('spawn-orbs-50)
+     ;; SPAWN ORBS 50
+     (chaos-spawn-money-burst 50 6.0))
+    (('spawn-orbs-wide-5)
+     ;; SPAWN ORBS WIDE 5
+     (chaos-spawn-money-burst 5 18.0))
+    (('spawn-orbs-wide-10)
+     ;; SPAWN ORBS WIDE 10
+     (chaos-spawn-money-burst 10 18.0))
+    (('spawn-orbs-wide-20)
+     ;; SPAWN ORBS WIDE 20
+     (chaos-spawn-money-burst 20 18.0))
+    (('spawn-orbs-wide-30)
+     ;; SPAWN ORBS WIDE 30
+     (chaos-spawn-money-burst 30 18.0))
+    (('spawn-orbs-wide-50)
+     ;; SPAWN ORBS WIDE 50
+     (chaos-spawn-money-burst 50 18.0))
+    (('weather-thunder)
+     ;; WEATHER THUNDER
+     (thunderTime))
+    (('weather-dark)
+     ;; WEATHER DARK
+     (DarkesetGlitchTime))
+    (('weather-rain)
+     ;; WEATHER RAIN
+     (rainyTime))
+    (('weather-snow)
+     ;; WEATHER SNOW
+     (snowingTime))
+    (('weather-default)
+     ;; WEATHER DEFAULT
+     (defaultWeatherTime))
+    (('tod-dawn)
+     ;; TOD DAWN
+     (set-time-of-day 6.0))
+    (('tod-morning)
+     ;; TOD MORNING
+     (set-time-of-day 9.0))
+    (('tod-noon)
+     ;; TOD NOON
+     (set-time-of-day 12.0))
+    (('tod-afternoon)
+     ;; TOD AFTERNOON
+     (set-time-of-day 15.0))
+    (('tod-evening)
+     ;; TOD EVENING
+     (set-time-of-day 18.0))
+    (('tod-night)
+     ;; TOD NIGHT
+     (set-time-of-day 0.0))
+    (('tod-random)
+     ;; TOD RANDOM
+     (set-time-of-day (rand-vu-float-range 0.0 24.0)))
+    (('hints-on)
+     ;; HINTS ON
+     (turnonplayhints))
+    (('hints-off)
+     ;; HINTS OFF
+     (turnoffplayhints))
+    (('collision-on)
+     ;; COLLISION ON
+     (turnonCollisionmode))
+    (('collision-off)
+     ;; COLLISION OFF
+     (turnoffCollisionmode))
+    (('life-full)
+     ;; LIFE FULL
+     (chaos-set-life (chaos-health-max)))
+    (('life-half)
+     ;; LIFE HALF
+     (chaos-set-life (* 0.5 (chaos-health-max))))
+    (('life-low)
+     ;; LIFE LOW
+     (chaos-set-life 1.0))
+    (('life-heal-1)
+     ;; LIFE HEAL 1
+     (chaos-add-life 1.0))
+    (('life-hurt-1)
+     ;; LIFE HURT 1
+     (chaos-add-life -1.0))
+    (('life-hurt-3)
+     ;; LIFE HURT 3
+     (chaos-add-life -3.0))
+
+    (('tp-checkpoint-rand)
+     ;; TELEPORT TO RANDOM CHECKPOINT
+     (chaos-teleport-random-checkpoint))
+    (('orbs-add-10) (chaos-add-orbs 10.0))
+    (('orbs-add-20) (chaos-add-orbs 20.0))
+    (('orbs-add-30) (chaos-add-orbs 30.0))
+    (('orbs-add-75) (chaos-add-orbs 75.0))
+    (('orbs-add-150) (chaos-add-orbs 150.0))
+    (('orbs-add-250) (chaos-add-orbs 250.0))
+    (('orbs-add-750) (chaos-add-orbs 750.0))
+    (('orbs-add-1000) (chaos-add-orbs 1000.0))
+    (('orbs-add-2000) (chaos-add-orbs 2000.0))
+    (('orbs-add-5000) (chaos-add-orbs 5000.0))
+    (('orbs-sub-10) (chaos-add-orbs -10.0))
+    (('orbs-sub-20) (chaos-add-orbs -20.0))
+    (('orbs-sub-30) (chaos-add-orbs -30.0))
+    (('orbs-sub-75) (chaos-add-orbs -75.0))
+    (('orbs-sub-150) (chaos-add-orbs -150.0))
+    (('orbs-sub-250) (chaos-add-orbs -250.0))
+    (('orbs-sub-750) (chaos-add-orbs -750.0))
+    (('orbs-sub-1000) (chaos-add-orbs -1000.0))
+    (('orbs-sub-2000) (chaos-add-orbs -2000.0))
+    (('orbs-sub-5000) (chaos-add-orbs -5000.0))
+    (('cells-add-8) (chaos-add-cells 8.0))
+    (('cells-add-10) (chaos-add-cells 10.0))
+    (('cells-add-12) (chaos-add-cells 12.0))
+    (('cells-add-15) (chaos-add-cells 15.0))
+    (('cells-add-25) (chaos-add-cells 25.0))
+    (('cells-add-40) (chaos-add-cells 40.0))
+    (('cells-sub-8) (chaos-add-cells -8.0))
+    (('cells-sub-10) (chaos-add-cells -10.0))
+    (('cells-sub-12) (chaos-add-cells -12.0))
+    (('cells-sub-15) (chaos-add-cells -15.0))
+    (('cells-sub-25) (chaos-add-cells -25.0))
+    (('cells-sub-40) (chaos-add-cells -40.0))
+    (('spawn-orbs-6) (chaos-spawn-money-burst 6 6.0))
+    (('spawn-orbs-12) (chaos-spawn-money-burst 12 6.0))
+    (('spawn-orbs-18) (chaos-spawn-money-burst 18 6.0))
+    (('spawn-orbs-24) (chaos-spawn-money-burst 24 6.0))
+    (('spawn-orbs-40) (chaos-spawn-money-burst 40 6.0))
+    (('spawn-orbs-60) (chaos-spawn-money-burst 60 6.0))
+    (('spawn-orbs-80) (chaos-spawn-money-burst 80 6.0))
+    (('spawn-orbs-wide-6) (chaos-spawn-money-burst 6 18.0))
+    (('spawn-orbs-wide-12) (chaos-spawn-money-burst 12 18.0))
+    (('spawn-orbs-wide-18) (chaos-spawn-money-burst 18 18.0))
+    (('spawn-orbs-wide-24) (chaos-spawn-money-burst 24 18.0))
+    (('spawn-orbs-wide-40) (chaos-spawn-money-burst 40 18.0))
+    (('spawn-orbs-wide-60) (chaos-spawn-money-burst 60 18.0))
+    (('spawn-orbs-wide-80) (chaos-spawn-money-burst 80 18.0))
+    (('tp-n-45) (chaos-teleport-offset 0.0 0.0 45.0))
+    (('tp-s-45) (chaos-teleport-offset 0.0 0.0 -45.0))
+    (('tp-e-45) (chaos-teleport-offset 45.0 0.0 0.0))
+    (('tp-w-45) (chaos-teleport-offset -45.0 0.0 0.0))
+    (('tp-ne-45) (chaos-teleport-offset 45.0 0.0 45.0))
+    (('tp-nw-45) (chaos-teleport-offset -45.0 0.0 45.0))
+    (('tp-se-45) (chaos-teleport-offset 45.0 0.0 -45.0))
+    (('tp-sw-45) (chaos-teleport-offset -45.0 0.0 -45.0))
+    (('tp-n-60) (chaos-teleport-offset 0.0 0.0 60.0))
+    (('tp-s-60) (chaos-teleport-offset 0.0 0.0 -60.0))
+    (('tp-e-60) (chaos-teleport-offset 60.0 0.0 0.0))
+    (('tp-w-60) (chaos-teleport-offset -60.0 0.0 0.0))
+    (('tp-ne-60) (chaos-teleport-offset 60.0 0.0 60.0))
+    (('tp-nw-60) (chaos-teleport-offset -60.0 0.0 60.0))
+    (('tp-se-60) (chaos-teleport-offset 60.0 0.0 -60.0))
+    (('tp-sw-60) (chaos-teleport-offset -60.0 0.0 -60.0))
+    (('tp-n-90) (chaos-teleport-offset 0.0 0.0 90.0))
+    (('tp-s-90) (chaos-teleport-offset 0.0 0.0 -90.0))
+    (('tp-e-90) (chaos-teleport-offset 90.0 0.0 0.0))
+    (('tp-w-90) (chaos-teleport-offset -90.0 0.0 0.0))
+    (('tp-up-30) (chaos-teleport-offset 0.0 30.0 0.0))
+    (('tp-down-30) (chaos-teleport-offset 0.0 -30.0 0.0))
+    (('tp-up-60) (chaos-teleport-offset 0.0 60.0 0.0))
+    (('tp-down-60) (chaos-teleport-offset 0.0 -60.0 0.0))
+    (('tp-up-90) (chaos-teleport-offset 0.0 90.0 0.0))
+    (('tp-down-90) (chaos-teleport-offset 0.0 -90.0 0.0))
+    (('tp-rand-01-03) (chaos-teleport-random 1.0 3.0))
+    (('tp-rand-03-06) (chaos-teleport-random 3.0 6.0))
+    (('tp-rand-06-12) (chaos-teleport-random 6.0 12.0))
+    (('tp-rand-12-25) (chaos-teleport-random 12.0 25.0))
+    (('tp-rand-25-50) (chaos-teleport-random 25.0 50.0))
+    (('tp-rand-50-100) (chaos-teleport-random 50.0 100.0))
+    (('tp-rand-100-160) (chaos-teleport-random 100.0 160.0))
+    (('tp-rand-160-260) (chaos-teleport-random 160.0 260.0))
+    (('tp-rand-260-400) (chaos-teleport-random 260.0 400.0))
+    (('tp-rand-400-600) (chaos-teleport-random 400.0 600.0))
+    (('tp-rand-600-800) (chaos-teleport-random 600.0 800.0))
+    (('tp-rand-800-1200) (chaos-teleport-random 800.0 1200.0))
+    (('life-heal-2) (chaos-add-life 2.0))
+    (('life-heal-5) (chaos-add-life 5.0))
+    (('life-heal-8) (chaos-add-life 8.0))
+    (('life-hurt-2) (chaos-add-life -2.0))
+    (('life-hurt-5) (chaos-add-life -5.0))
+    (('life-hurt-8) (chaos-add-life -8.0))
+    (else 0))
+  0)
+
+
+(defun chaos-effect-allowed? ((effect symbol))
+  (cond
+    ((eq? effect 'crash-delay) *chaos-crash-enabled?*)
+    (else #t)))
+
 (defun chaos-pick-effect ()
-  (let ((roll (rand-vu-int-range 0 17)))
-    (case roll
-      ((0) 'big-head)
-      ((1) 'small-head)
-      ((2) 'mirror)
-      ((3) 'invinc)
-      ((4) 'no-tex)
-      ((5) 'eco-blue)
-      ((6) 'eco-red)
-      ((7) 'eco-green)
-      ((8) 'eco-yellow)
-      ((9) 'sidekick-blue)
-      ((10) 'tunes)
-      ((11) 'sky)
-      ((12) 'big-fist)
-      ((13) 'hard-rats)
-      ((14) 'hero-mode)
-      ((15) 'huge-head)
-      ((16) 'big-head-npc)
-      ((17) 'oh-my-goodness)
-      (else 'big-head))))
+  (let ((picked (-> *chaos-effect-list* (rand-vu-int-range 0 (the int (+ CHAOS_EFFECT_COUNT -1)))))
+        (tries 0))
+    (while (and (not (chaos-effect-allowed? picked)) (< tries CHAOS_EFFECT_COUNT))
+      (set! picked (-> *chaos-effect-list* (rand-vu-int-range 0 (the int (+ CHAOS_EFFECT_COUNT -1)))))
+      (set! tries (+ tries 1)))
+    picked))
 
 (defun chaos-effect-duration ((effect symbol))
   (case effect
+    (('kill-delay) CHAOS_WARN_SEC)
+    (('crash-delay) CHAOS_WARN_SEC)
+    (('fake-crash) CHAOS_FAKE_CRASH_SEC)
     (('big-head)   CHAOS_DUR_BIG_HEAD)
     (('small-head) CHAOS_DUR_SMALL_HEAD)
     (('mirror)     CHAOS_DUR_MIRROR)
@@ -107,7 +1047,32 @@
     (('huge-head)  CHAOS_DUR_HUGE_HEAD)
     (('big-head-npc) CHAOS_DUR_BIG_HEAD_NPC)
     (('oh-my-goodness) CHAOS_DUR_OH_MY_GOODNESS)
-    (else CHAOS_DURATION_SEC)))
+    (('weather-dark) CHAOS_DUR_DWEATHER)
+    (('weather-thunder) CHAOS_DUR_DWEATHER)
+    (('weather-rain) CHAOS_DUR_DWEATHER)
+    (('weather-snow) CHAOS_DUR_DWEATHER)
+    (('weather-default) CHAOS_DUR_DWEATHER)
+    (('tod-dawn) CHAOS_DUR_SKY)
+    (('tod-morning) CHAOS_DUR_SKY)
+    (('tod-noon) CHAOS_DUR_SKY)
+    (('tod-afternoon) CHAOS_DUR_SKY)
+    (('tod-evening) CHAOS_DUR_SKY)
+    (('tod-night) CHAOS_DUR_SKY)
+    (('tod-random) CHAOS_DUR_SKY)
+    (('collision-on) CHAOS_DUR_XRAY)
+    (else CHAOS_DUR_ONE_SHOT)))
+
+
+(defun chaos-is-persistent-effect? ((effect symbol))
+  "Check if effect should persist (cheat-based effects)"
+  (case effect
+    (('big-head 'small-head 'mirror 'invinc 'no-tex 
+      'eco-blue 'eco-red 'eco-green 'eco-yellow
+      'sidekick-blue 'tunes 'sky 'big-fist 'hard-rats
+      'hero-mode 'huge-head 'big-head-npc 'oh-my-goodness
+      'weather-thunder 'weather-dark 'weather-rain 'weather-snow 'weather-default
+      'tod-dawn 'tod-morning 'tod-noon 'tod-afternoon 'tod-evening 'tod-night 'tod-random 'collision-on) #t)
+    (else #f)))
 
 (defun chaos-reapply-all ()
   "Reapply all active effects"
@@ -118,29 +1083,49 @@
              (use-pe (the pair (if (pair? (car pe)) (car pe) pe)))
              (effect (the symbol (car use-pe))))
         (case effect
-          (('big-head) (chaos-apply-cheat (pc-cheats big-head)))
-          (('small-head) (chaos-apply-cheat (pc-cheats small-head)))
-          (('mirror) (chaos-apply-cheat (pc-cheats mirror)))
-          (('invinc) (chaos-apply-cheat (pc-cheats invinc)))
-          (('no-tex) (chaos-apply-cheat (pc-cheats no-tex)))
-          (('eco-blue) (chaos-apply-cheat (pc-cheats eco-blue)))
-          (('eco-red) (chaos-apply-cheat (pc-cheats eco-red)))
-          (('eco-green) (chaos-apply-cheat (pc-cheats eco-green)))
-          (('eco-yellow) (chaos-apply-cheat (pc-cheats eco-yellow)))
-          (('sidekick-blue) (chaos-apply-cheat (pc-cheats sidekick-blue)))
-          (('tunes) (chaos-apply-cheat (pc-cheats tunes)))
-          (('sky) (chaos-apply-cheat (pc-cheats sky)))
-          (('big-fist) (chaos-apply-cheat (pc-cheats big-fist)))
-          (('hard-rats) (chaos-apply-cheat (pc-cheats hard-rats)))
-          (('hero-mode) (chaos-apply-cheat (pc-cheats hero-mode)))
-          (('huge-head) (chaos-apply-cheat (pc-cheats huge-head)))
-          (('big-head-npc) (chaos-apply-cheat (pc-cheats big-head-npc)))
-          (('oh-my-goodness) (chaos-apply-cheat (pc-cheats oh-my-goodness)))))))
+          (('big-head) (chaos-apply-cheat (pc-cheats big-head))) ;; Jak head scale up
+          (('small-head) (chaos-apply-cheat (pc-cheats small-head))) ;; Jak head scale down
+          (('mirror) (chaos-apply-cheat (pc-cheats mirror))) ;; Mirror camera/world
+          (('invinc) (chaos-apply-cheat (pc-cheats invinc))) ;; Invincible
+          (('no-tex) (chaos-apply-cheat (pc-cheats no-tex))) ;; Disable textures
+          (('eco-blue) (chaos-apply-cheat (pc-cheats eco-blue))) ;; Force blue eco
+          (('eco-red) (chaos-apply-cheat (pc-cheats eco-red))) ;; Force red eco
+          (('eco-green) (chaos-apply-cheat (pc-cheats eco-green))) ;; Force green eco
+          (('eco-yellow) (chaos-apply-cheat (pc-cheats eco-yellow))) ;; Force yellow eco
+          (('sidekick-blue) (chaos-apply-cheat (pc-cheats sidekick-blue))) ;; Make daxter blue
+          (('tunes) (chaos-apply-cheat (pc-cheats tunes))) ;; All music flavas
+          (('sky) (chaos-apply-cheat (pc-cheats sky))) ;; Real-time sky/time-of-day
+          (('big-fist) (chaos-apply-cheat (pc-cheats big-fist))) ;; Big hands
+          (('hard-rats) (chaos-apply-cheat (pc-cheats hard-rats))) ;; Make rats harder
+          (('hero-mode) (chaos-apply-cheat (pc-cheats hero-mode))) ;; Hero mode flag
+          (('huge-head) (chaos-apply-cheat (pc-cheats huge-head))) ;; Huge head scale
+          (('big-head-npc) (chaos-apply-cheat (pc-cheats big-head-npc))) ;; NPC head scale up
+          (('oh-my-goodness) (chaos-apply-cheat (pc-cheats oh-my-goodness))) ;; Large npc chest scale
+          (('weather-thunder) (thunderTime))
+          (('weather-dark) (DarkesetGlitchTime))
+          (('weather-rain) (rainyTime))
+          (('weather-snow) (snowingTime))
+          (('weather-default) (defaultWeatherTime))
+          (('tod-dawn) (set-time-of-day 6.0))
+          (('tod-morning) (set-time-of-day 9.0))
+          (('tod-noon) (set-time-of-day 12.0))
+          (('tod-afternoon) (set-time-of-day 15.0))
+          (('tod-evening) (set-time-of-day 18.0))
+          (('tod-night) (set-time-of-day 0.0))
+          (('tod-random) (set-time-of-day (rand-vu-float-range 0.0 24.0)))
+          (('collision-on) (turnonCollisionmode))
+          ))))0)
+
+(defun chaos-start-effect-permanent ((effect symbol) (frame int))
+  (when (and effect (not (chaos-effect-active? effect)))
+    (let ((end-frame (+ frame (chaos-seconds->frames CHAOS_STARTUP_PERSIST_SEC))))
+      (set! *chaos-active-list* (cons (cons effect end-frame) *chaos-active-list*))
+      (chaos-reapply-all)))
   0)
 
 (defun chaos-start-effect ((effect symbol) (frame int))
   "Start a new effect, allowing stacking"
-  (when effect
+  (when (and effect (chaos-effect-allowed? effect))
     (let* ((end-frame (+ frame (chaos-seconds->frames (chaos-effect-duration effect))))
            (new-list '())
            (found? #f))
@@ -158,12 +1143,158 @@
       (when (not found?)
         (set! new-list (cons (cons effect end-frame) new-list)))
       (set! *chaos-active-list* new-list)
+      (chaos-apply-effect effect frame)
       ;; Reapply all effects
       (chaos-reapply-all)))
   0)
 
 (defun chaos-schedule-next ((frame int))
-  (set! *chaos-next-frame* (+ frame (chaos-seconds->frames CHAOS_INTERVAL_SEC)))
+  (set! *chaos-next-frame* (+ frame (the int (seconds *chaos-interval-sec*))))
+  0)
+
+
+(defun chaos-menu-effect-func ((effect object))
+  (chaos-start-effect (the symbol effect) *chaos-last-ticks*)
+  #t)
+
+(defun chaos-menu-trigger-random ((arg0 object))
+  (chaos-start-effect (chaos-pick-effect) *chaos-last-ticks*)
+  #t)
+
+(defun chaos-menu-clear-func ((arg0 object))
+  (chaos-clear-all)
+  #t)
+
+(defun chaos-menu-interval-var ((arg0 int) (msg debug-menu-msg) (newval int) (oldval int))
+  ;; Some debug-menu builds step by 10 even when you pass step=1.
+  ;; We force +/- 1 second changes regardless of what newval comes in as.
+  (cond
+    ((= msg (debug-menu-msg press))
+     (let* ((delta (- newval oldval))
+            (clamped oldval))
+       (cond
+         ((> delta 0) (set! clamped (+ oldval 1)))
+         ((< delta 0) (set! clamped (- oldval 1)))
+         (else (set! clamped oldval)))
+       (when (< clamped CHAOS_MENU_INTERVAL_MIN) (set! clamped CHAOS_MENU_INTERVAL_MIN))
+       (when (> clamped CHAOS_MENU_INTERVAL_MAX) (set! clamped CHAOS_MENU_INTERVAL_MAX))
+       (set! *chaos-interval-sec* clamped)
+       (when *chaos-enabled?*
+         (chaos-schedule-next *chaos-last-ticks*))
+       clamped))
+    (else *chaos-interval-sec*)))
+
+
+(defun chaos-menu-build-effects ((menu debug-menu))
+  (debug-menu-remove-all-items menu)
+  (dotimes (i CHAOS_EFFECT_COUNT)
+    (let ((effect (-> *chaos-effect-list* i)))
+      (debug-menu-append-item menu
+                              (new 'debug 'debug-menu-item-function
+                                   (chaos-effect-display-name effect)
+                                   effect
+                                   (the-as (function object object) chaos-menu-effect-func)))))
+  0)
+
+(defun chaos-menu-init ()
+  (when (not *chaos-menu-context*)
+    (set! *chaos-menu-context* (new 'debug 'debug-menu-context))
+    (let ((root (new 'debug 'debug-menu *chaos-menu-context* "Chaos Menu"))
+          (effects (new 'debug 'debug-menu *chaos-menu-context* "Effects")))
+      (set! *chaos-menu-root* root)
+      (set! *chaos-menu-effects* effects)
+      (debug-menu-context-set-root-menu *chaos-menu-context* root)
+      (debug-menu-append-item root (new 'debug 'debug-menu-item-flag "Show Watermark" '*showwm* dm-boolean-toggle-pick-func))
+      (debug-menu-append-item root (new 'debug 'debug-menu-item-flag "Chaos Enabled" '*chaos-enabled?* dm-boolean-toggle-pick-func))
+      (debug-menu-append-item root (new 'debug 'debug-menu-item-flag "Crash Effects" '*chaos-crash-enabled?* dm-boolean-toggle-pick-func))
+      (let ((interval-item (new 'debug 'debug-menu-item-var "Interval (s)" 0 80)))
+        (debug-menu-item-var-make-int interval-item chaos-menu-interval-var 1 #t CHAOS_MENU_INTERVAL_MIN CHAOS_MENU_INTERVAL_MAX #f)
+        (debug-menu-append-item root interval-item))
+      (debug-menu-append-item root (new 'debug 'debug-menu-item-function "Trigger Random" #f (the-as (function object object) chaos-menu-trigger-random)))
+      (debug-menu-append-item root (new 'debug 'debug-menu-item-function "Clear Effects" #f (the-as (function object object) chaos-menu-clear-func)))
+      (debug-menu-append-item root (new 'debug 'debug-menu-item-submenu "Effects" effects))
+      (chaos-menu-build-effects effects)))
+  0)
+
+(defun chaos-menu-toggle-requested? ()
+  ;; Custom debug menu toggle: hold L1 + R1 + L2, then click any of them.
+  ;; (We avoid L3+R3 because it conflicts with the stock debug menu.)
+  (let ((held (cpad-hold 0)))
+    (and (= (logand held (pad-buttons l1 r1 l2)) (pad-buttons l1 r1 l2))
+         (or (cpad-pressed? 0 l1) (cpad-pressed? 0 r1) (cpad-pressed? 0 l2)))))
+
+(defun chaos-menu-open? ()
+  (and *chaos-menu-context* (-> *chaos-menu-context* is-active)))
+
+(defun chaos-menu-toggle ()
+  (when *chaos-menu-context*
+    (if (-> *chaos-menu-context* is-active)
+        (debug-menu-context-send-msg *chaos-menu-context* (debug-menu-msg deactivate) (debug-menu-dest activation))
+        (begin
+          (debug-menu-context-default-selection *chaos-menu-context* #f)
+          (debug-menu-context-send-msg *chaos-menu-context* (debug-menu-msg activate) (debug-menu-dest activation)))))
+  0)
+
+(defun chaos-handle-input ((ticks int))
+  (when (chaos-menu-active?)
+    (when (cpad-pressed? 0 up)
+      (set! *chaos-selected-index* (- *chaos-selected-index* 1))
+      (chaos-wrap-selected-index)
+      (chaos-update-selected-effect))
+    (when (cpad-pressed? 0 down)
+      (set! *chaos-selected-index* (+ *chaos-selected-index* 1))
+      (chaos-wrap-selected-index)
+      (chaos-update-selected-effect))
+
+    (when (cpad-pressed? 0 left)
+      (let ((v (- *chaos-interval-sec* 1)))
+        (when (< v 1) (set! v 1))
+        (set! *chaos-interval-sec* v)
+        (when *chaos-enabled?* (chaos-schedule-next ticks))))
+    (when (cpad-pressed? 0 right)
+      (let ((v (+ *chaos-interval-sec* 1)))
+        (when (> v 120) (set! v 120))
+        (set! *chaos-interval-sec* v)
+        (when *chaos-enabled?* (chaos-schedule-next ticks))))
+
+    (when (cpad-pressed? 0 square)
+      (set! *chaos-enabled?* (not *chaos-enabled?*))
+      ;; when re-enabling, restart the countdown from now so it feels responsive
+      (when *chaos-enabled?*
+        (chaos-schedule-next ticks)))
+
+    (when (cpad-pressed? 0 x)
+      (chaos-start-effect *chaos-selected-effect* ticks))
+
+    (when (cpad-pressed? 0 circle)
+      (chaos-clear-all))
+  0))
+
+(defun chaos-draw-select-menu ((ticks int))
+  "Draw the selection menu only while holding L1+R1+L2."
+  (when (and (= *master-mode* 'game)
+             (chaos-menu-active?)
+             (not (or (movie?)
+                      (< (-> *display* base-frame-counter)
+                         (-> *game-info* letterbox-time)))))
+    (let* ((x 20)
+           (y 60)
+           (name (symbol->string *chaos-selected-effect*))
+           (interval-secs *chaos-interval-sec*)
+           (line2 "UP/DOWN: SELECT   X: ACTIVATE")
+           (line3 "LEFT/RIGHT: INTERVAL   SQUARE: TIMER ON/OFF   CIRCLE: CLEAR"))
+      (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                   (bucket-id subtitle))
+        (draw-string-xy (string-format "SELECT: ~a   (INTERVAL: ~d s)   (TIMER: ~a)" name interval-secs (if *chaos-enabled?* "ON" "OFF")) buf x y
+          (font-color white)
+          (font-flags shadow kerning))
+        (draw-string-xy line2 buf x (+ y 26)
+          (font-color white)
+          (font-flags shadow kerning))
+        (draw-string-xy line3 buf x (+ y 52)
+          (font-color white)
+          (font-flags shadow kerning))
+        )))
   0)
 
 (defun chaos-update ((ticks int))
@@ -172,26 +1303,56 @@
   (when (not *pc-settings*)
     (return 0))
 
+  ;; remember tick count for functions that don't take args
+  (set! *chaos-last-ticks* ticks)
+  ;; Delayed startup clear: run once after pc-settings exists (spawn/init timing).
+  (when *chaos-startup-clear-pending?*
+    (set! *chaos-startup-clear-pending?* #f)
+    (chaos-clear-all))
+
+
   ;; Initialize next frame if needed
-  (when (= *chaos-next-frame* 0)
+  (when (and *chaos-enabled?* (= *chaos-next-frame* 0))
     (chaos-schedule-next ticks))
 
-  ;; Remove expired effects and normalize any nested pairs
+  ;; Run delayed actions
+  (chaos-run-pending ticks)
+
+  ;; Remove expired effects, but keep one-shot effects visible for a bit
   (let ((new-list '())
-        (changed? #f))
+        (changed? #f)
+        (list-size 0))
     (dolist (entry *chaos-active-list*)
       (if (pair? entry)
           (let* ((pe (the pair entry))
                  (use-pe (the pair (if (pair? (car pe)) (car pe) pe)))
-                 (end-frame (the int (cdr use-pe))))
+                 (effect (the symbol (car use-pe)))
+                 (end-frame (the int (cdr use-pe)))
+                 (is-persistent (chaos-is-persistent-effect? effect))
+                 (is-delay (or (eq? effect 'kill-delay) (eq? effect 'crash-delay)))
+                 (keep? (or (< ticks end-frame)  ;; Still active
+                            (and (not is-persistent)  ;; One-shot effect
+                                 (not is-delay)
+                                 (< list-size CHAOS_MAX_LIST_SIZE)))))  ;; List not full
             (when (pair? (car pe))
               (set! changed? #t))
-            (if (< ticks end-frame)
-                (set! new-list (the pair (append! new-list (cons use-pe '()))))
-                (set! changed? #t)))
+            (if keep?
+                (begin
+                  (set! new-list (the pair (append! new-list (cons use-pe '()))))
+                  (+! list-size 1))
+                (begin
+                  (when (eq? effect 'kill-delay)
+                    (chaos-do-kill))
+                  (when (eq? effect 'crash-delay)
+                    (chaos-do-crash))
+                  (when (eq? effect 'collision-on)
+                    (turnoffCollisionmode))
+                  (set! changed? #t))))
           (set! changed? #t)))
     (when changed?
       (set! *chaos-active-list* new-list)
+      (when (not (chaos-any-visual-active?))
+        (chaos-reset-visuals))
       (chaos-reapply-all)))
 
   ;; Trigger new effect on schedule (allows stacking)
@@ -202,24 +1363,46 @@
   0)
 
 (defun runs-every-frame ()
-  ;;(increase-power-cell-by-one) This is a call to increase-power-cell-by-one defined in mod-common-functions.gc
   (if *show-input-display* (input-display-on) (input-display-off))
-  ;; ensure orb-placer is spawned/killed as requested, debug menu is updated
   (when *debug-segment*
     (orb-placer-maintenance))
-  
-  (chaos-update (the int (-> *display* base-frame-counter)))
-  
-  (draw-timer)
-  (draw-active-effects)
-  
-  (when (cpad-pressed? 0 l3)
-    (set! *showwm* (not *showwm*)))
-  (when *showwm*
-    (draw-watermark)
-  )
-  (none)
-)
+
+  (let ((ticks (the int (-> *display* base-frame-counter))))
+    (when (not *chaos-menu-context*)
+      (chaos-menu-init))
+    (when (chaos-menu-toggle-requested?)
+      (chaos-menu-toggle))
+    ;; If fake crash is active, freeze Jak by snapping position back each frame,
+    ;; and don't advance chaos timers/effects.
+    (if (chaos-fake-crash-active? ticks)
+        (begin
+          (when *target*
+            (let ((p (target-pos 0)))
+              (set! (-> p x) (-> *chaos-fake-crash-pos* x))
+              (set! (-> p y) (-> *chaos-fake-crash-pos* y))
+              (set! (-> p z) (-> *chaos-fake-crash-pos* z))))
+          (chaos-draw-fake-crash))
+        (begin
+          (when *chaos-fake-crash-paused?*
+            (chaos-end-fake-crash))
+          (let ((menu-open (chaos-menu-open?)))
+            (when (not menu-open)
+              (chaos-handle-input ticks))
+            (chaos-update ticks)
+            (draw-timer)
+            (when (not menu-open)
+              (chaos-draw-select-menu ticks)
+              (when (chaos-menu-active?) (draw-selected-effect)))
+            (draw-active-effects)
+            (when *chaos-menu-context*
+              (debug-menus-handler *chaos-menu-context*))
+            (when (and (cpad-pressed? 0 l3)
+                       (not (= (logand (cpad-hold 0) (pad-buttons r3)) (pad-buttons r3))))
+              (set! *showwm* (not *showwm*)))
+            (when *showwm*
+              (draw-watermark))))))
+
+  (none))
 
 (defun runs-on-orb-pickup ((parent process-tree))
   (let* ((from-cache? (and parent (type-type? (-> parent type) orb-cache-top))))
@@ -273,9 +1456,15 @@
 
 (defun runs-on-jak-spawn ()
   ;; Code here runs every time jak spawns (loading a file new game or death)
-  ;;uncomment this to use custom music for custom levels - the function is in mod-common-functions.gc
-  ;;(process-spawn-function process music-manager-proc)
+  ;; We defer the hard clear until chaos-update, because *pc-settings* may not exist yet here.
+  (set! *chaos-startup-clear-pending?* #t)
+  ;; still wipe chaos lists immediately (these are our own globals, safe to clear now)
+  (set! *chaos-active-list* '())
+  (set! *chaos-pending-list* '())
+  (set! *chaos-fake-crash-until* 0)
+  (chaos-end-fake-crash)
   (none))
+
 
 (defun runs-on-jak-death ((death-event symbol))
   (case death-event
@@ -292,3 +1481,16 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 #| these are no longer recommended/supported however we include them anyways to not break anyones mods. |#
+
+
+
+
+
+
+
+
+
+
+
+
+
