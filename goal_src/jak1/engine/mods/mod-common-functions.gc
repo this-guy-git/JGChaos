@@ -208,7 +208,6 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
     (('fake-crash) "Fake Crash")
     (('instant-crash) "Instant Crash")
     
-    
     (else (string-upcase (symbol->string effect) *chaos-name-buffer*))))
 
 
