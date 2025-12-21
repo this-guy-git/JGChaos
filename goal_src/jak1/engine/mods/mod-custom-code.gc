@@ -79,19 +79,11 @@
 (defun chaos-reapply-all ()
   "Reapply all active effects"
   (chaos-clear-cheats)
-  (format 0 "[CHAOS] Reapplying ~d effects~%" (length *chaos-active-list*))
   (dolist (entry *chaos-active-list*)
-    ;; Check what entry actually is
-    (format 0 "[CHAOS]   Raw entry: ~S~%" entry)
-    (format 0 "[CHAOS]   Is pair?: ~S~%" (pair? entry))
     (when (pair? entry)
-      (format 0 "[CHAOS]   car of entry: ~S~%" (car entry))
-      (format 0 "[CHAOS]   Is car a pair?: ~S~%" (pair? (car entry)))
-      ;; If car is ALSO a pair, we have double nesting - need to unwrap twice
-      (let ((effect (if (pair? (car entry))
-                        (the symbol (car (car entry)))
-                        (the symbol (car entry)))))
-        (format 0 "[CHAOS]   Final effect symbol: ~S~%" effect)
+      (let* ((pe (the pair entry))
+             (use-pe (the pair (if (pair? (car pe)) (car pe) pe)))
+             (effect (the symbol (car use-pe))))
         (case effect
           (('big-head) (chaos-apply-cheat (pc-cheats big-head)))
           (('small-head) (chaos-apply-cheat (pc-cheats small-head)))
@@ -106,13 +98,22 @@
   "Start a new effect, allowing stacking"
   (when effect
     (let* ((end-frame (+ frame (chaos-seconds->frames (chaos-effect-duration effect))))
-           (new-pair (cons effect end-frame)))
-      ;; Add to active list
-      (set! *chaos-active-list* (cons new-pair *chaos-active-list*))
-      ;; Debug
-      (format 0 "[CHAOS] Started ~S until frame ~d~%" effect end-frame)
-      (format 0 "[CHAOS] New pair: ~S~%" new-pair)
-      (format 0 "[CHAOS] List now has ~d entries~%" (length *chaos-active-list*))
+           (new-list '())
+           (found? #f))
+      ;; If effect already exists, refresh its timer and drop duplicates.
+      (dolist (entry *chaos-active-list*)
+        (when (pair? entry)
+          (let* ((pe (the pair entry))
+                 (use-pe (the pair (if (pair? (car pe)) (car pe) pe)))
+                 (eff (the symbol (car use-pe))))
+            (if (eq? eff effect)
+                (when (not found?)
+                  (set! new-list (the pair (append! new-list (cons (cons eff end-frame) '()))))
+                  (set! found? #t))
+                (set! new-list (the pair (append! new-list (cons use-pe '()))))))))
+      (when (not found?)
+        (set! new-list (cons (cons effect end-frame) new-list)))
+      (set! *chaos-active-list* new-list)
       ;; Reapply all effects
       (chaos-reapply-all)))
   0)
@@ -126,29 +127,34 @@
   ;; Guard against pc-settings not existing
   (when (not *pc-settings*)
     (return 0))
-    
+
   ;; Initialize next frame if needed
   (when (= *chaos-next-frame* 0)
     (chaos-schedule-next ticks))
-  
-  ;; Remove expired effects
+
+  ;; Remove expired effects and normalize any nested pairs
   (let ((new-list '())
         (changed? #f))
     (dolist (entry *chaos-active-list*)
-      (when (pair? entry)
-        (let ((end-frame (the int (cdr entry))))
-          (if (< ticks end-frame)
-              (set! new-list (cons entry new-list))
-              (set! changed? #t)))))
+      (if (pair? entry)
+          (let* ((pe (the pair entry))
+                 (use-pe (the pair (if (pair? (car pe)) (car pe) pe)))
+                 (end-frame (the int (cdr use-pe))))
+            (when (pair? (car pe))
+              (set! changed? #t))
+            (if (< ticks end-frame)
+                (set! new-list (the pair (append! new-list (cons use-pe '()))))
+                (set! changed? #t)))
+          (set! changed? #t)))
     (when changed?
       (set! *chaos-active-list* new-list)
       (chaos-reapply-all)))
-  
+
   ;; Trigger new effect on schedule (allows stacking)
   (when (and *chaos-enabled?* (>= ticks *chaos-next-frame*))
     (chaos-start-effect (chaos-pick-effect) ticks)
     (chaos-schedule-next ticks))
-  
+
   0)
 
 (defun runs-every-frame ()

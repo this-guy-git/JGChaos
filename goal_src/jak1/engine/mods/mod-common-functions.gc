@@ -109,15 +109,16 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
                       (< (-> *display* base-frame-counter)
                          (-> *game-info* letterbox-time))))
              *chaos-active-list*)
-    (let* ((x 320)  ;; Moved left from 380
-           (y 80)
+    (let* ((x 380)
+           (time-x 510)
+           (y 20)
            (ticks (the int (-> *display* base-frame-counter)))
            (line-height 32))
       
       ;; Draw header
       (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
                                    (bucket-id subtitle))
-        (draw-string-xy "ACTIVE EFFECTS" buf x y
+        (draw-string-xy "ACTIVE EFFECTS" buf (- x 70) (- y 15)
           (font-color orange)
           (font-flags shadow kerning large)))
       
@@ -126,11 +127,11 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
       ;; Draw separator line
       (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
                                    (bucket-id subtitle))
-        (draw-string-xy "_______________" buf x y
+        (draw-string-xy "_______________" buf (+ x 45) (- y 30) 
           (font-color default)
           (font-flags shadow kerning)))
       
-      (set! y (+ y 24))
+      (set! y (- y 20))
       
       ;; Draw each active effect
       (dolist (entry *chaos-active-list*)
@@ -156,11 +157,11 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
                 color
                 (font-flags shadow kerning))
               ;; Draw time remaining (aligned to right)
-              (draw-string-xy time-str buf (+ x 130) y
+              (draw-string-xy time-str buf time-x y
                 color
-                (font-flags shadow kerning)))
+                (font-flags right shadow kerning)))
             
-            (set! y (+ y 22)))))))
+            (set! y (+ y 10)))))))
   (the pointer #f))
 
 (defmacro current-cell-count ()
