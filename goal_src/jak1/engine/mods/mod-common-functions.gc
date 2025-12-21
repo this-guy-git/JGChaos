@@ -35,6 +35,9 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 ;; Define Custom Variables to use in mods
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(define-extern *chaos-active-list* pair) ;; from mod-custom-code.gc
+(define-extern *chaos-next-frame* int)
+
 (defconstant *wm* "J1GCHAOS V0.01.0")
 (defconstant *author* "BY THIS GUY")
 
@@ -70,39 +73,101 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 )
 
 (defun draw-timer ()
-  (let* ((x 100) (y 100)
-         (ticks (the int (-> *display* base-frame-counter)))
-         (secs-left (the int (fmax 0.0 (/ (the float (- *chaos-next-frame* ticks)) (the float TICKS_PER_SECOND)))))
-         (label (string-format "NEXT: ~d" secs-left)))
-    (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
-                                 (bucket-id subtitle))
-      (draw-string-xy label buf x y
-        (font-color white)
-        (font-flags shadow kerning large)))))
-
-(defun draw-active-effects ()
-  (when *chaos-active*
-    (let* ((x 380) (y 100)
+  "Draw countdown to next chaos effect"
+  (when (and (= *master-mode* 'game)
+             (not (or (movie?)
+                      (< (-> *display* base-frame-counter)
+                         (-> *game-info* letterbox-time)))))
+    (let* ((x 100) (y 100)
            (ticks (the int (-> *display* base-frame-counter)))
-           (secs-left (the int (fmax 0.0 (/ (the float (- *chaos-end-frame* ticks)) (the float TICKS_PER_SECOND)))))
-           (name (case *chaos-active*
-                   (('big-head) "BIG HEAD")
-                   (('small-head) "SMALL HEAD")
-                   (('mirror) "MIRROR")
-                   (('invinc) "INVINCIBLE")
-                   (('no-tex) "NO TEX")
-                   (('eco-blue) "BLUE ECO")
-                   (('eco-red) "RED ECO")
-                   (else "CHAOS")))
-           (time-label (string-format "~d s" secs-left)))
+           (secs-left (the int (fmax 0.0 (/ (the float (- *chaos-next-frame* ticks)) (the float TICKS_PER_SECOND)))))
+           (label (if (> *chaos-next-frame* 0)
+                      (string-format "NEXT: ~d" secs-left)
+                      "NEXT: --")))
       (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
                                    (bucket-id subtitle))
-        (draw-string-xy name buf x y
+        (draw-string-xy label buf x y
           (font-color white)
-          (font-flags shadow kerning large))
-        (draw-string-xy time-label buf x (+ y 18)
-          (font-color white)
-          (font-flags shadow kerning))))))
+          (font-flags shadow kerning large))))))
+
+(defun chaos-effect-name ((effect symbol))
+  "Get display name for effect"
+  (case effect
+    (('big-head) "Big Head")
+    (('small-head) "Small Head")
+    (('mirror) "Mirror World")
+    (('invinc) "Invincible")
+    (('no-tex) "No Textures")
+    (('eco-blue) "Blue Eco")
+    (('eco-red) "Red Eco")
+    (else "Unknown")))
+
+(defun draw-active-effects ()
+  "Draw all active chaos effects in a clean stacked list"
+  (when (and (= *master-mode* 'game)
+             (not (or (movie?)
+                      (< (-> *display* base-frame-counter)
+                         (-> *game-info* letterbox-time))))
+             *chaos-active-list*)
+    (let* ((x 320)  ;; Moved left from 380
+           (y 80)
+           (ticks (the int (-> *display* base-frame-counter)))
+           (line-height 32))
+      
+      ;; Draw header
+      (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                   (bucket-id subtitle))
+        (draw-string-xy "ACTIVE EFFECTS" buf x y
+          (font-color orange)
+          (font-flags shadow kerning large)))
+      
+      (set! y (+ y line-height))
+      
+      ;; Draw separator line
+      (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                   (bucket-id subtitle))
+        (draw-string-xy "_______________" buf x y
+          (font-color default)
+          (font-flags shadow kerning)))
+      
+      (set! y (+ y 24))
+      
+      ;; Draw each active effect
+      (dolist (entry *chaos-active-list*)
+        (when (pair? entry)
+          ;; Handle double-nesting: if car is also a pair, unwrap twice
+          (let* ((actual-pair (if (pair? (car entry)) (car entry) entry))
+                 (effect (the symbol (car actual-pair)))
+                 (end-frame (the int (cdr actual-pair)))
+                 (remaining (- end-frame ticks))
+                 (secs-left (the int (fmax 0.0 (/ (the float remaining) (the float TICKS_PER_SECOND)))))
+                 (name (chaos-effect-name effect))
+                 (time-str (string-format "~ds" secs-left))
+                 ;; Color based on time remaining
+                 (color (cond
+                          ((< secs-left 3) (font-color red))
+                          ((< secs-left 7) (font-color yellow))
+                          (else (font-color white)))))
+            
+            (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                         (bucket-id subtitle))
+              ;; Draw effect name
+              (draw-string-xy name buf x y
+                color
+                (font-flags shadow kerning))
+              ;; Draw time remaining (aligned to right)
+              (draw-string-xy time-str buf (+ x 130) y
+                color
+                (font-flags shadow kerning)))
+            
+            (set! y (+ y 22)))))))
+  (the pointer #f))
+
+(defmacro current-cell-count ()
+  `(-> *game-info* fuel))
+
+(defmacro set-current-cell-count (count)
+  `(set! (-> *game-info* fuel) ,count))
 
 (defun increase-power-cell-by-one ()
   (set-current-cell-count (+ (current-cell-count) 1))

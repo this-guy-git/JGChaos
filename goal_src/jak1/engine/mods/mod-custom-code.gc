@@ -21,10 +21,9 @@
 ;; Begin function defintions.
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; Lightweight chaos system: periodic random effects using PC cheats.
+;; Lightweight chaos system: periodic random effects using PC cheats with STACKING
 (defconstant CHAOS_INTERVAL_SEC 5.0)
 (defconstant CHAOS_DURATION_SEC 20.0)
-
 
 (defconstant CHAOS_DUR_BIG_HEAD   18.0)
 (defconstant CHAOS_DUR_SMALL_HEAD 18.0)
@@ -34,10 +33,8 @@
 (defconstant CHAOS_DUR_ECO_BLUE   18.0)
 (defconstant CHAOS_DUR_ECO_RED    18.0)
 
-
 (define *chaos-enabled?* #t)
-(define *chaos-active* #f)
-(define *chaos-end-frame* 0)
+(define *chaos-active-list* '()) ;; list of (effect . end-frame)
 (define *chaos-next-frame* 0)
 (define *chaos-cheat-mask* (pc-cheats))
 
@@ -45,18 +42,19 @@
   (the int (* sec (the float TICKS_PER_SECOND))))
 
 (defun chaos-clear-cheats ()
-  (when (nonzero? *chaos-cheat-mask*)
+  (when (and *pc-settings* (nonzero? *chaos-cheat-mask*))
     (logclear! (-> *pc-settings* cheats) *chaos-cheat-mask*)
     (set! *chaos-cheat-mask* (pc-cheats)))
   0)
 
 (defun chaos-apply-cheat ((mask pc-cheats))
-  (logior! (-> *pc-settings* cheats) mask)
-  (logior! *chaos-cheat-mask* mask)
+  (when *pc-settings*
+    (logior! (-> *pc-settings* cheats) mask)
+    (logior! *chaos-cheat-mask* mask))
   0)
 
 (defun chaos-pick-effect ()
-  (let ((roll (rand-vu-int-range 0 6)))
+  (let ((roll (rand-vu-int-range 0 7)))
     (case roll
       ((0) 'big-head)
       ((1) 'small-head)
@@ -64,7 +62,8 @@
       ((3) 'invinc)
       ((4) 'no-tex)
       ((5) 'eco-blue)
-      (else 'eco-red))))
+      ((6) 'eco-red)
+      (else 'big-head))))
 
 (defun chaos-effect-duration ((effect symbol))
   (case effect
@@ -77,19 +76,45 @@
     (('eco-red)    CHAOS_DUR_ECO_RED)
     (else CHAOS_DURATION_SEC)))
 
-(defun chaos-start-effect ((effect symbol) (frame int))
+(defun chaos-reapply-all ()
+  "Reapply all active effects"
   (chaos-clear-cheats)
-  (case effect
-    (('big-head) (chaos-apply-cheat (pc-cheats big-head)))
-    (('small-head) (chaos-apply-cheat (pc-cheats small-head)))
-    (('mirror) (chaos-apply-cheat (pc-cheats mirror)))
-    (('invinc) (chaos-apply-cheat (pc-cheats invinc)))
-    (('no-tex) (chaos-apply-cheat (pc-cheats no-tex)))
-    (('eco-blue) (chaos-apply-cheat (pc-cheats eco-blue)))
-    (('eco-red) (chaos-apply-cheat (pc-cheats eco-red)))
-    )
-  (set! *chaos-active* effect)
-  (set! *chaos-end-frame* (+ frame (chaos-seconds->frames (chaos-effect-duration effect))))
+  (format 0 "[CHAOS] Reapplying ~d effects~%" (length *chaos-active-list*))
+  (dolist (entry *chaos-active-list*)
+    ;; Check what entry actually is
+    (format 0 "[CHAOS]   Raw entry: ~S~%" entry)
+    (format 0 "[CHAOS]   Is pair?: ~S~%" (pair? entry))
+    (when (pair? entry)
+      (format 0 "[CHAOS]   car of entry: ~S~%" (car entry))
+      (format 0 "[CHAOS]   Is car a pair?: ~S~%" (pair? (car entry)))
+      ;; If car is ALSO a pair, we have double nesting - need to unwrap twice
+      (let ((effect (if (pair? (car entry))
+                        (the symbol (car (car entry)))
+                        (the symbol (car entry)))))
+        (format 0 "[CHAOS]   Final effect symbol: ~S~%" effect)
+        (case effect
+          (('big-head) (chaos-apply-cheat (pc-cheats big-head)))
+          (('small-head) (chaos-apply-cheat (pc-cheats small-head)))
+          (('mirror) (chaos-apply-cheat (pc-cheats mirror)))
+          (('invinc) (chaos-apply-cheat (pc-cheats invinc)))
+          (('no-tex) (chaos-apply-cheat (pc-cheats no-tex)))
+          (('eco-blue) (chaos-apply-cheat (pc-cheats eco-blue)))
+          (('eco-red) (chaos-apply-cheat (pc-cheats eco-red)))))))
+  0)
+
+(defun chaos-start-effect ((effect symbol) (frame int))
+  "Start a new effect, allowing stacking"
+  (when effect
+    (let* ((end-frame (+ frame (chaos-seconds->frames (chaos-effect-duration effect))))
+           (new-pair (cons effect end-frame)))
+      ;; Add to active list
+      (set! *chaos-active-list* (cons new-pair *chaos-active-list*))
+      ;; Debug
+      (format 0 "[CHAOS] Started ~S until frame ~d~%" effect end-frame)
+      (format 0 "[CHAOS] New pair: ~S~%" new-pair)
+      (format 0 "[CHAOS] List now has ~d entries~%" (length *chaos-active-list*))
+      ;; Reapply all effects
+      (chaos-reapply-all)))
   0)
 
 (defun chaos-schedule-next ((frame int))
@@ -97,14 +122,33 @@
   0)
 
 (defun chaos-update ((ticks int))
+  "Update chaos system - remove expired effects and trigger new ones"
+  ;; Guard against pc-settings not existing
+  (when (not *pc-settings*)
+    (return 0))
+    
+  ;; Initialize next frame if needed
   (when (= *chaos-next-frame* 0)
     (chaos-schedule-next ticks))
-  (when (and *chaos-active* (>= ticks *chaos-end-frame*))
-    (chaos-clear-cheats)
-    (set! *chaos-active* #f))
-  (when (and *chaos-enabled?* (not *chaos-active*) (>= ticks *chaos-next-frame*))
+  
+  ;; Remove expired effects
+  (let ((new-list '())
+        (changed? #f))
+    (dolist (entry *chaos-active-list*)
+      (when (pair? entry)
+        (let ((end-frame (the int (cdr entry))))
+          (if (< ticks end-frame)
+              (set! new-list (cons entry new-list))
+              (set! changed? #t)))))
+    (when changed?
+      (set! *chaos-active-list* new-list)
+      (chaos-reapply-all)))
+  
+  ;; Trigger new effect on schedule (allows stacking)
+  (when (and *chaos-enabled?* (>= ticks *chaos-next-frame*))
     (chaos-start-effect (chaos-pick-effect) ticks)
     (chaos-schedule-next ticks))
+  
   0)
 
 (defun runs-every-frame ()
