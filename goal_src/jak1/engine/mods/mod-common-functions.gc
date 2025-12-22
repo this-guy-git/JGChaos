@@ -40,7 +40,7 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 (define-extern *chaos-enabled?* symbol)
 (define-extern *chaos-selected-effect* symbol)
 
-(defconstant *wm* "J1GCHAOS V0.01.0")
+(defconstant *wm* "J1GCHAOS V0.02.2")
 (defconstant *author* "BY THIS GUY")
 
 ;; took far too long to find these coords
