@@ -81,13 +81,9 @@
 (define *chaos-menu-mode* 'main) ;; 'main or 'effects
 (define *chaos-main-index* 0)
 (define *chaos-show-watermark?* #t)
+(define *chaos-show-hint* #t)
 (define *chaos-ui-hidden?* #t)
 
-;; Manual control (hold L1+R1):
-;;   D-Pad Up/Down = select effect
-;;   X            = activate selected effect immediately
-;;   Square       = toggle chaos timer on/off
-;;   Circle       = clear all active effects
 (define *chaos-selected-index* 0)
 (define *chaos-selected-effect* 'big-head)
 
@@ -973,6 +969,7 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
   *chaos-menu-open?*)
 
 (defun chaos-menu-toggle ()
+  (set! *chaos-show-hint* #f)
   (set! *chaos-menu-open?* (not *chaos-menu-open?*))
   (when *chaos-menu-open?*
     (set! *chaos-menu-mode* 'main)
@@ -1264,10 +1261,14 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
                         (draw-active-effects)))
                     ;; Watermark is allowed during gameplay unless cutscene (handled above).
                     (when *chaos-show-watermark?*
-                      (draw-watermark))))
+                      (draw-watermark))
+                    (when *chaos-show-hint*
+                      (draw-hint))
+                    ))
               ;; Not in gameplay yet (e.g., title screen / save select): watermark only.
               (when *chaos-show-watermark?*
-                (draw-watermark))))))
+                (draw-watermark))
+              ))))
 
   (none))
 (defun runs-on-orb-pickup ((parent process-tree))

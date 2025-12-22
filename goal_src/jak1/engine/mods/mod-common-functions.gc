@@ -234,6 +234,21 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
     )))
 )
 
+(defun draw-hint ()
+  (when (and (= *master-mode* 'game)
+             (not (or (movie?)
+                      (< (-> *display* base-frame-counter)
+                         (-> *game-info* letterbox-time)))))
+
+    (let ((x 90)  (y 100))
+      (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                                   (bucket-id subtitle))
+        (draw-string-xy "PRESS L1+R1+L2 TO OPEN MENU" buf x y
+          (font-color white)
+          (font-flags shadow kerning large))
+    )))
+)
+
 (defun draw-timer ()
   "Draw countdown to next chaos effect (or OFF if disabled)"
   (when (and (= *master-mode* 'game)
