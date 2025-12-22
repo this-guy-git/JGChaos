@@ -75,9 +75,13 @@
 
 (define *chaos-enabled?* #f) ;; timer on/off
 (define *chaos-crash-enabled?* #t)
-(define *chaos-menu-context* (the-as debug-menu-context #f))
-(define *chaos-menu-root* (the-as debug-menu #f))
-(define *chaos-menu-effects* (the-as debug-menu #f))
+(define *chaos-menu-open?* #f)
+(define *chaos-menu-scroll* 0)
+
+(define *chaos-menu-mode* 'main) ;; 'main or 'effects
+(define *chaos-main-index* 0)
+(define *chaos-show-watermark?* #t)
+(define *chaos-ui-hidden?* #f)
 
 ;; Manual control (hold L1+R1):
 ;;   D-Pad Up/Down = select effect
@@ -953,137 +957,203 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
   (chaos-clear-all)
   #t)
 
-(defun chaos-menu-interval-var ((arg0 int) (msg debug-menu-msg) (newval int) (oldval int))
-  ;; Some debug-menu builds step by 10 even when you pass step=1.
-  ;; We force +/- 1 second changes regardless of what newval comes in as.
-  (cond
-    ((= msg (debug-menu-msg press))
-     (let* ((delta (- newval oldval))
-            (clamped oldval))
-       (cond
-         ((> delta 0) (set! clamped (+ oldval 1)))
-         ((< delta 0) (set! clamped (- oldval 1)))
-         (else (set! clamped oldval)))
-       (when (< clamped CHAOS_MENU_INTERVAL_MIN) (set! clamped CHAOS_MENU_INTERVAL_MIN))
-       (when (> clamped CHAOS_MENU_INTERVAL_MAX) (set! clamped CHAOS_MENU_INTERVAL_MAX))
-       (set! *chaos-interval-sec* clamped)
-       (when *chaos-enabled?*
-         (chaos-schedule-next *chaos-last-ticks*))
-       clamped))
-    (else *chaos-interval-sec*)))
 
-
-(defun chaos-menu-build-effects ((menu debug-menu))
-  (debug-menu-remove-all-items menu)
-  (dotimes (i CHAOS_EFFECT_COUNT)
-    (let ((effect (-> *chaos-effect-list* i)))
-      (debug-menu-append-item menu
-                              (new 'debug 'debug-menu-item-function
-                                   (chaos-effect-display-name effect)
-                                   effect
-                                   (the-as (function object object) chaos-menu-effect-func)))))
-  0)
-
-(defun chaos-menu-init ()
-  (when (not *chaos-menu-context*)
-    (set! *chaos-menu-context* (new 'debug 'debug-menu-context))
-    (let ((root (new 'debug 'debug-menu *chaos-menu-context* "Chaos Menu"))
-          (effects (new 'debug 'debug-menu *chaos-menu-context* "Effects")))
-      (set! *chaos-menu-root* root)
-      (set! *chaos-menu-effects* effects)
-      (debug-menu-context-set-root-menu *chaos-menu-context* root)
-      (debug-menu-append-item root (new 'debug 'debug-menu-item-flag "Show Watermark" '*showwm* dm-boolean-toggle-pick-func))
-      (debug-menu-append-item root (new 'debug 'debug-menu-item-flag "Chaos Enabled" '*chaos-enabled?* dm-boolean-toggle-pick-func))
-      (debug-menu-append-item root (new 'debug 'debug-menu-item-flag "Crash Effects" '*chaos-crash-enabled?* dm-boolean-toggle-pick-func))
-      (let ((interval-item (new 'debug 'debug-menu-item-var "Interval (s)" 0 80)))
-        (debug-menu-item-var-make-int interval-item chaos-menu-interval-var 1 #t CHAOS_MENU_INTERVAL_MIN CHAOS_MENU_INTERVAL_MAX #f)
-        (debug-menu-append-item root interval-item))
-      (debug-menu-append-item root (new 'debug 'debug-menu-item-function "Trigger Random" #f (the-as (function object object) chaos-menu-trigger-random)))
-      (debug-menu-append-item root (new 'debug 'debug-menu-item-function "Clear Effects" #f (the-as (function object object) chaos-menu-clear-func)))
-      (debug-menu-append-item root (new 'debug 'debug-menu-item-submenu "Effects" effects))
-      (chaos-menu-build-effects effects)))
-  0)
+;; ---------------------------------------------------------------------------
+;; Retail-safe popout menu (debug-menu replacement)
+;; Toggle popout with L1 + R1 + L2 (press any of them while all 3 are held).
+;; ---------------------------------------------------------------------------
 
 (defun chaos-menu-toggle-requested? ()
-  ;; Custom debug menu toggle: hold L1 + R1 + L2, then click any of them.
-  ;; (We avoid L3+R3 because it conflicts with the stock debug menu.)
   (let ((held (cpad-hold 0)))
     (and (= (logand held (pad-buttons l1 r1 l2)) (pad-buttons l1 r1 l2))
          (or (cpad-pressed? 0 l1) (cpad-pressed? 0 r1) (cpad-pressed? 0 l2)))))
 
 (defun chaos-menu-open? ()
-  (and *chaos-menu-context* (-> *chaos-menu-context* is-active)))
+  *chaos-menu-open?*)
 
 (defun chaos-menu-toggle ()
-  (when *chaos-menu-context*
-    (if (-> *chaos-menu-context* is-active)
-        (debug-menu-context-send-msg *chaos-menu-context* (debug-menu-msg deactivate) (debug-menu-dest activation))
-        (begin
-          (debug-menu-context-default-selection *chaos-menu-context* #f)
-          (debug-menu-context-send-msg *chaos-menu-context* (debug-menu-msg activate) (debug-menu-dest activation)))))
+  (set! *chaos-menu-open?* (not *chaos-menu-open?*))
+  (when *chaos-menu-open?*
+    (set! *chaos-menu-mode* 'main)
+    (set! *chaos-main-index* 0))
+  ;; keep selection in-bounds for effects submenu
+  (chaos-wrap-selected-index)
+  (chaos-update-selected-effect)
+  0)
+
+(defun chaos-menu-visible-rows () 10)
+
+(defun chaos-menu-adjust-scroll ()
+  ;; ensure selected index is visible within the window
+  (let* ((rows (chaos-menu-visible-rows))
+         (sel *chaos-selected-index*)
+         (top *chaos-menu-scroll*)
+         (bot (+ top (- rows 1))))
+    (when (< sel top) (set! *chaos-menu-scroll* sel))
+    (when (> sel bot) (set! *chaos-menu-scroll* (- sel (- rows 1))))
+    (when (< *chaos-menu-scroll* 0) (set! *chaos-menu-scroll* 0))
+    (let ((max-top (- CHAOS_EFFECT_COUNT rows)))
+      (when (< max-top 0) (set! max-top 0))
+      (when (> *chaos-menu-scroll* max-top) (set! *chaos-menu-scroll* max-top))))
+  0)
+
+(defun chaos-menu-interval-dec ((ticks int))
+  (let ((v (- *chaos-interval-sec* 1)))
+    (when (< v CHAOS_MENU_INTERVAL_MIN) (set! v CHAOS_MENU_INTERVAL_MIN))
+    (set! *chaos-interval-sec* v)
+    (when *chaos-enabled?* (chaos-schedule-next ticks)))
+  0)
+
+(defun chaos-menu-interval-inc ((ticks int))
+  (let ((v (+ *chaos-interval-sec* 1)))
+    (when (> v CHAOS_MENU_INTERVAL_MAX) (set! v CHAOS_MENU_INTERVAL_MAX))
+    (set! *chaos-interval-sec* v)
+    (when *chaos-enabled?* (chaos-schedule-next ticks)))
+  0)
+
+
+(defun chaos-main-wrap-index ()
+  (when (< *chaos-main-index* 0) (set! *chaos-main-index* 6))
+  (when (> *chaos-main-index* 6) (set! *chaos-main-index* 0))
+  0)
+
+(defun chaos-toggle-timer ((ticks int))
+  (set! *chaos-enabled?* (not *chaos-enabled?*))
+  (when *chaos-enabled?*
+    (chaos-schedule-next ticks))
+  0)
+
+(defun chaos-main-activate ((ticks int))
+  ;; X activates/toggles current row in main menu
+  (case *chaos-main-index*
+    ((0) (set! *chaos-show-watermark?* (not *chaos-show-watermark?*)))
+    ((1) (chaos-toggle-timer ticks))
+    ((2) (set! *chaos-crash-enabled?* (not *chaos-crash-enabled?*)))
+    ((3) (none)) ;; Interval row - adjusted via LEFT/RIGHT when selected
+    ((4) (set! *chaos-menu-mode* 'effects))
+    ((5) (chaos-clear-all))
+    ((6) (set! *chaos-ui-hidden?* (not *chaos-ui-hidden?*))))
   0)
 
 (defun chaos-handle-input ((ticks int))
-  (when (chaos-menu-active?)
-    (when (cpad-pressed? 0 up)
-      (set! *chaos-selected-index* (- *chaos-selected-index* 1))
-      (chaos-wrap-selected-index)
-      (chaos-update-selected-effect))
-    (when (cpad-pressed? 0 down)
-      (set! *chaos-selected-index* (+ *chaos-selected-index* 1))
-      (chaos-wrap-selected-index)
-      (chaos-update-selected-effect))
+  ;; Toggle popout (retail-safe)
+  (when (chaos-menu-toggle-requested?)
+    (chaos-menu-toggle))
 
-    (when (cpad-pressed? 0 left)
-      (let ((v (- *chaos-interval-sec* 1)))
-        (when (< v 1) (set! v 1))
-        (set! *chaos-interval-sec* v)
-        (when *chaos-enabled?* (chaos-schedule-next ticks))))
-    (when (cpad-pressed? 0 right)
-      (let ((v (+ *chaos-interval-sec* 1)))
-        (when (> v 120) (set! v 120))
-        (set! *chaos-interval-sec* v)
-        (when *chaos-enabled?* (chaos-schedule-next ticks))))
+  (when (chaos-menu-open?)
+    (case *chaos-menu-mode*
+      (('main)
+        (when (cpad-pressed? 0 up)
+          (set! *chaos-main-index* (- *chaos-main-index* 1))
+          (chaos-main-wrap-index))
+        (when (cpad-pressed? 0 down)
+          (set! *chaos-main-index* (+ *chaos-main-index* 1))
+          (chaos-main-wrap-index))
 
-    (when (cpad-pressed? 0 square)
-      (set! *chaos-enabled?* (not *chaos-enabled?*))
-      ;; when re-enabling, restart the countdown from now so it feels responsive
-      (when *chaos-enabled?*
-        (chaos-schedule-next ticks)))
+        ;; Interval only adjusts when the Interval row is selected
+        (when (and (= *chaos-main-index* 3) (cpad-pressed? 0 left))
+          (chaos-menu-interval-dec ticks))
+        (when (and (= *chaos-main-index* 3) (cpad-pressed? 0 right))
+          (chaos-menu-interval-inc ticks))
 
-    (when (cpad-pressed? 0 x)
-      (chaos-start-effect *chaos-selected-effect* ticks))
+        (when (cpad-pressed? 0 x)
+          (chaos-main-activate ticks)))
 
-    (when (cpad-pressed? 0 circle)
-      (chaos-clear-all))
-  0))
+      (('effects)
+        (when (cpad-pressed? 0 up)
+          (set! *chaos-selected-index* (- *chaos-selected-index* 1))
+          (chaos-wrap-selected-index)
+          (chaos-update-selected-effect)
+          (chaos-menu-adjust-scroll))
+        (when (cpad-pressed? 0 down)
+          (set! *chaos-selected-index* (+ *chaos-selected-index* 1))
+          (chaos-wrap-selected-index)
+          (chaos-update-selected-effect)
+          (chaos-menu-adjust-scroll))
+
+        ;; Allow interval tweak while browsing effects too (matches debug-menu feel)
+        (when (cpad-pressed? 0 left)
+          (chaos-menu-interval-dec ticks))
+        (when (cpad-pressed? 0 right)
+          (chaos-menu-interval-inc ticks))
+
+        (when (cpad-pressed? 0 x)
+          (chaos-start-effect *chaos-selected-effect* ticks))
+
+        ;; Back to main without using Circle/Square
+        (when (cpad-pressed? 0 triangle)
+          (set! *chaos-menu-mode* 'main)
+          (set! *chaos-main-index* 0)))))
+
+  0)
+
+
+
 
 (defun chaos-draw-select-menu ((ticks int))
-  "Draw the selection menu only while holding L1+R1+L2."
+  "Retail popout menu (toggle with L1+R1+L2)."
   (when (and (= *master-mode* 'game)
-             (chaos-menu-active?)
+             (chaos-menu-open?)
              (not (or (movie?)
                       (< (-> *display* base-frame-counter)
                          (-> *game-info* letterbox-time)))))
-    (let* ((x 20)
-           (y 60)
-           (name (symbol->string *chaos-selected-effect*))
-           (interval-secs *chaos-interval-sec*)
-           (line2 "UP/DOWN: SELECT   X: ACTIVATE")
-           (line3 "LEFT/RIGHT: INTERVAL   SQUARE: TIMER ON/OFF   CIRCLE: CLEAR"))
+    (let* ((x 10)
+           (y 10))
       (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
                                    (bucket-id subtitle))
-        (draw-string-xy (string-format "SELECT: ~a   (INTERVAL: ~d s)   (TIMER: ~a)" name interval-secs (if *chaos-enabled?* "ON" "OFF")) buf x y
-          (font-color white)
-          (font-flags shadow kerning))
-        (draw-string-xy line2 buf x (+ y 26)
-          (font-color white)
-          (font-flags shadow kerning))
-        (draw-string-xy line3 buf x (+ y 52)
-          (font-color white)
-          (font-flags shadow kerning))
-        )))
+      (case *chaos-menu-mode*
+        (('main)
+          (let* ((interval-secs (the int *chaos-interval-sec*))
+                 (lines (new 'stack 'boxed-array string 7)))
+            (set! (-> lines 0) (if *chaos-show-watermark?* "Show Watermark: ON" "Show Watermark: OFF"))
+            (set! (-> lines 1) (if *chaos-enabled?* "Chaos: ON" "Chaos: OFF"))
+            (set! (-> lines 2) (if *chaos-crash-enabled?* "Crash Effects: ON" "Crash Effects: OFF"))
+            (set! (-> lines 3) (string-format "Interval: ~ds" interval-secs))
+            (set! (-> lines 4) "Effects...")
+            (set! (-> lines 5) "Clear Effects")
+            (set! (-> lines 6) (if *chaos-ui-hidden?* "Hide Chaos UI: ON" "Hide Chaos UI: OFF"))
+
+            ;; Title
+            (draw-string-xy "CHAOS" buf x y
+              (font-color white)
+              (font-flags shadow kerning))
+
+            ;; Items
+            (dotimes (i 7)
+              (let* ((sel? (= i *chaos-main-index*))
+                     (mark (if sel? "> " "  "))
+                     (ly (+ y 22 (* i 18))))
+                (draw-string-xy mark buf x ly
+                  (font-color white)
+                  (font-flags shadow kerning))
+                (draw-string-xy (-> lines i) buf (+ x 18) ly
+                  (font-color white)
+                  (font-flags shadow kerning))))))
+        (('effects)
+          (let* ((rows (chaos-menu-visible-rows))
+                 (top *chaos-menu-scroll*)
+                 (interval-secs (the int *chaos-interval-sec*)))
+            (draw-string-xy "EFFECTS" buf (+ x 15) y
+              (font-color white)
+              (font-flags shadow kerning))
+            (dotimes (i rows)
+              (let ((idx (+ top i)))
+                (when (< idx CHAOS_EFFECT_COUNT)
+                  (let* ((eff (-> *chaos-effect-list* idx))
+                         (sel? (= idx *chaos-selected-index*))
+                         (mark (if sel? "> " "  "))
+                         (ly (+ y 12 (* i 18)))
+                         (name (symbol->string eff)))
+                    (draw-string-xy mark buf x ly
+                      (font-color white)
+                      (font-flags shadow kerning))
+                    (draw-string-xy name buf (+ x 20) ly
+                      (font-color white)
+                      (font-flags shadow kerning)))))))))))
+      )
   0)
+
+
 
 (defun chaos-update ((ticks int))
   "Update chaos system - remove expired effects and trigger new ones"
@@ -1156,10 +1226,6 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
     (orb-placer-maintenance))
 
   (let ((ticks (the int (-> *display* base-frame-counter))))
-    (when (not *chaos-menu-context*)
-      (chaos-menu-init))
-    (when (chaos-menu-toggle-requested?)
-      (chaos-menu-toggle))
     ;; If fake crash is active, freeze Jak by snapping position back each frame,
     ;; and don't advance chaos timers/effects.
     (if (chaos-fake-crash-active? ticks)
@@ -1174,21 +1240,14 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
           (when *chaos-fake-crash-paused?*
             (chaos-end-fake-crash))
           (let ((menu-open (chaos-menu-open?)))
-            (when (not menu-open)
-              (chaos-handle-input ticks))
+            (chaos-handle-input ticks)
             (chaos-update ticks)
             (draw-timer)
-            (when (not menu-open)
-              (chaos-draw-select-menu ticks)
-              (when (chaos-menu-active?) (draw-selected-effect)))
-            (draw-active-effects)
-            (when *chaos-menu-context*
-              (debug-menus-handler *chaos-menu-context*))
-            (when (and (cpad-pressed? 0 l3)
-                       (not (= (logand (cpad-hold 0) (pad-buttons r3)) (pad-buttons r3))))
-              (set! *showwm* (not *showwm*)))
-            (when *showwm*
-              (draw-watermark))))))
+            (chaos-draw-select-menu ticks)
+            (when (not *chaos-ui-hidden?*)
+              (draw-active-effects)
+              (when *chaos-show-watermark?*
+                (draw-watermark)))))))
 
   (none))
 
