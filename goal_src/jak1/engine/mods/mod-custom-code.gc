@@ -1090,6 +1090,16 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 
 
 
+
+(defun chaos-in-game? ()
+  "True when player has loaded into gameplay (save selected, Jak exists)."
+  (and (= *master-mode* 'game) *target*))
+
+(defun chaos-in-cutscene? ((ticks int))
+  "True during movies / letterbox cutscenes."
+  (or (movie?)
+      (< ticks (-> *game-info* letterbox-time))))
+
 (defun chaos-draw-select-menu ((ticks int))
   "Retail popout menu (toggle with L1+R1+L2)."
   (when (and (= *master-mode* 'game)
@@ -1239,18 +1249,25 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
         (begin
           (when *chaos-fake-crash-paused?*
             (chaos-end-fake-crash))
-          (let ((menu-open (chaos-menu-open?)))
-            (chaos-handle-input ticks)
-            (chaos-update ticks)
-            (draw-timer)
-            (chaos-draw-select-menu ticks)
-            (when (not *chaos-ui-hidden?*)
-              (draw-active-effects)
+          (if (chaos-in-game?)
+              (if (chaos-in-cutscene? ticks)
+                  ;; In-game cutscenes: hide chaos UI entirely.
+                  (none)
+                  (begin
+                    (chaos-handle-input ticks)
+                    (chaos-update ticks)
+                    (when (not *chaos-ui-hidden?*)
+                      (draw-timer)
+                      (chaos-draw-select-menu ticks)
+                      (draw-active-effects))
+                    ;; Watermark is allowed during gameplay unless cutscene (handled above).
+                    (when *chaos-show-watermark?*
+                      (draw-watermark))))
+              ;; Not in gameplay yet (e.g., title screen / save select): watermark only.
               (when *chaos-show-watermark?*
-                (draw-watermark)))))))
+                (draw-watermark))))))
 
   (none))
-
 (defun runs-on-orb-pickup ((parent process-tree))
   (let* ((from-cache? (and parent (type-type? (-> parent type) orb-cache-top))))
     ;; Code here runs on ANY orb pickup
