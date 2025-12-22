@@ -81,7 +81,7 @@
 (define *chaos-menu-mode* 'main) ;; 'main or 'effects
 (define *chaos-main-index* 0)
 (define *chaos-show-watermark?* #t)
-(define *chaos-ui-hidden?* #f)
+(define *chaos-ui-hidden?* #t)
 
 ;; Manual control (hold L1+R1):
 ;;   D-Pad Up/Down = select effect
@@ -963,9 +963,10 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 ;; Toggle popout with L1 + R1 + L2 (press any of them while all 3 are held).
 ;; ---------------------------------------------------------------------------
 
-(defun chaos-menu-toggle-requested? ()
+(defun chaos-retail-menu-toggle-requested? ()
   (let ((held (cpad-hold 0)))
-    (and (= (logand held (pad-buttons l1 r1 l2)) (pad-buttons l1 r1 l2))
+    (and (chaos-in-game?)
+         (= (logand held (pad-buttons l1 r1 l2)) (pad-buttons l1 r1 l2))
          (or (cpad-pressed? 0 l1) (cpad-pressed? 0 r1) (cpad-pressed? 0 l2)))))
 
 (defun chaos-menu-open? ()
@@ -1037,7 +1038,7 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 
 (defun chaos-handle-input ((ticks int))
   ;; Toggle popout (retail-safe)
-  (when (chaos-menu-toggle-requested?)
+  (when (chaos-retail-menu-toggle-requested?)
     (chaos-menu-toggle))
 
   (when (chaos-menu-open?)
@@ -1256,10 +1257,11 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
                   (begin
                     (chaos-handle-input ticks)
                     (chaos-update ticks)
-                    (when (not *chaos-ui-hidden?*)
-                      (draw-timer)
+                    (begin
                       (chaos-draw-select-menu ticks)
-                      (draw-active-effects))
+                      (when (not *chaos-ui-hidden?*)
+                        (draw-timer)
+                        (draw-active-effects)))
                     ;; Watermark is allowed during gameplay unless cutscene (handled above).
                     (when *chaos-show-watermark?*
                       (draw-watermark))))
