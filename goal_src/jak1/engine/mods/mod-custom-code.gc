@@ -936,6 +936,10 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
       (chaos-reapply-all)))
   0)
 
+(defun chaos-in-game? ()
+  "True when player has loaded into gameplay (save selected, Jak exists)."
+  (and (= *master-mode* 'game) *target*))
+
 (defun chaos-schedule-next ((frame int))
   (set! *chaos-next-frame* (+ frame (the int (seconds *chaos-interval-sec*))))
   0)
@@ -1085,13 +1089,6 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 
   0)
 
-
-
-
-
-(defun chaos-in-game? ()
-  "True when player has loaded into gameplay (save selected, Jak exists)."
-  (and (= *master-mode* 'game) *target*))
 
 (defun chaos-in-cutscene? ((ticks int))
   "True during movies / letterbox cutscenes."
