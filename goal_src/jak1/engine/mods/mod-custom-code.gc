@@ -15,6 +15,12 @@
 (define *chaos-fake-crash-prev-mask* (the-as process-mask 0))
 
 (define *chaos-last-ticks* 0) ;; updated each chaos-update; used for rescheduling after clear
+(define *chaos-minigame-paused?* #f)
+(define *chaos-saved-active-list* '())
+(define *chaos-saved-pending-list* '())
+(define *chaos-saved-next-frame* 0)
+(define *chaos-saved-enabled?* #f)
+(define *chaos-pinball-last-bounce* 0)
 
 
 ;; name: mod-custom-code.gc
@@ -69,13 +75,14 @@
 (defconstant CHAOS_MENU_INTERVAL_MIN 1)
 (defconstant CHAOS_MENU_INTERVAL_MAX 120)
 
-(defconstant CHAOS_EFFECT_COUNT 110)
+(defconstant CHAOS_EFFECT_COUNT 127) ;; DOnt forget to change
 (define *chaos-effect-list* (new 'global 'boxed-array symbol CHAOS_EFFECT_COUNT))
 
 
 (define *chaos-enabled?* #f) ;; timer on/off
-(define *chaos-crash-enabled?* #t)
+(define *chaos-crash-enabled?* #f)
 (define *chaos-menu-open?* #f)
+(define *chaos-menu-opened?* #f) ;; has been opened at least once
 (define *chaos-menu-scroll* 0)
 
 (define *chaos-menu-mode* 'main) ;; 'main or 'effects
@@ -138,7 +145,11 @@
   ;; Reset player-specific state that may persist beyond cheat flags.
   ;; Currently: restore health to max (undo kill/health effects) and clear fake-crash freeze position.
   (when *target*
-    (chaos-set-life (chaos-health-max)))
+    (chaos-set-life (chaos-health-max))
+    (set! (-> *target* control dynam gravity-max) (-> *target* control unknown-dynamics00 gravity-max))
+    (set! (-> *target* control dynam gravity-length) (-> *target* control unknown-dynamics00 gravity-length))
+    (vector-identity! (-> *target* root scale))
+    (vector-identity! (-> *target* control scale)))
   (when *chaos-fake-crash-pos*
     (set-vector! *chaos-fake-crash-pos* 0.0 0.0 0.0 1.0))
   0)
@@ -150,20 +161,68 @@
     (logclear! (-> *pc-settings* cheats) (pc-cheats eco-red eco-yellow big-fist)))
   0)
 (defun chaos-clear-cheats ()
-  (when (and *pc-settings* (nonzero? *chaos-cheat-mask*))
-    (logclear! (-> *pc-settings* cheats) *chaos-cheat-mask*)
-    (set! *chaos-cheat-mask* (pc-cheats)))
+  "Clear ALL known rendering/visual cheats to ensure nothing persists."
+  (when *pc-settings*
+    ;; Clear based on stored mask
+    (when (nonzero? *chaos-cheat-mask*)
+      (logclear! (-> *pc-settings* cheats) *chaos-cheat-mask*)
+      (set! *chaos-cheat-mask* (pc-cheats)))
+    ;; ALSO forcefully clear all possible rendering cheats in case mask missed any
+    (logclear! (-> *pc-settings* cheats)
+               (pc-cheats big-head small-head mirror invinc no-tex
+                         eco-blue eco-red eco-green eco-yellow
+                         sidekick-blue tunes sky big-fist hard-rats
+                         hero-mode huge-head big-head-npc oh-my-goodness))
+    ;; Force engine to apply the cleared state
+    (when *setting-control*
+      (apply-settings *setting-control*)))
   0)
 
 (defun chaos-reset-visuals ()
   "Reset visual world-state back to default/sane values."
-  (defaultWeatherTime)
+  (chaosDefaultWeatherTime)
   (set-time-of-day 12.0)
+  0)
+
+;; Move helper shutdown handlers here so `chaos-clear-all` can call them
+(defun chaos-do-kill ()
+  (when *target*
+    (send-event *target* 'attack-invinc #f (static-attack-info ((mode 'instant-death)))))
+  0)
+
+(defun chaos-do-crash ()
+  (when *chaos-crash-enabled?*
+    (format 0 "CHAOS CRASH~%")
+    (set! (-> (the (pointer int) 0) 0) #x1337))
+  0)
+
+(defun chaos-end-fake-crash ()
+  (when *chaos-fake-crash-paused?*
+    (set! *chaos-fake-crash-paused?* #f)
+    (when *setting-control*
+      (set! (-> *setting-control* default process-mask) *chaos-fake-crash-prev-mask*)
+      (apply-settings *setting-control*)))
   0)
 
 (defun chaos-clear-all ()
   "Hard clear: remove active + pending effects, reset fake-crash, clear cheats, reset visuals.
 Also reschedule the next random effect so clearing doesn't instantly trigger a new one."
+  ;; Run per-effect shutdown handlers the same way expiration does so any
+  ;; side-effects (fake-crash, collision mode, delayed kills/crashes) are
+  ;; cleaned up exactly as when an effect naturally times out.
+  (let ((old-list *chaos-active-list*))
+    (dolist (entry old-list)
+      (when (pair? entry)
+        (let* ((pe (the pair entry))
+               (use-pe (the pair (if (pair? (car pe)) (car pe) pe)))
+               (effect (the symbol (car use-pe))))
+          (case effect
+            (('kill-delay) (chaos-do-kill))
+            (('crash-delay) (chaos-do-crash))
+            (('fake-crash) (chaos-end-fake-crash))
+            (('collision-on) (turnoffCollisionmode))
+            (else 0))))))
+
   (set! *chaos-active-list* '())
   (set! *chaos-pending-list* '())
   (set! *chaos-fake-crash-until* 0)
@@ -189,6 +248,28 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 
 
 ;; Clear ALL active/pending effects and restore normal gameplay state
+
+;; Pause/resume helpers for fishing minigame.
+(defun chaos-pause-for-minigame ()
+  "Save all chaos state before fishing minigame."
+  (set! *chaos-saved-active-list* *chaos-active-list*)
+  (set! *chaos-saved-pending-list* *chaos-pending-list*)
+  (set! *chaos-saved-next-frame* *chaos-next-frame*)
+  (set! *chaos-saved-enabled?* *chaos-enabled?*)
+  ;; Clear active effects and disable new ones
+  (chaos-clear-all)
+  (set! *chaos-enabled?* #f)
+  (set! *chaos-minigame-paused?* #t)
+  0)
+
+(defun chaos-resume-after-minigame ()
+  "Restore chaos state after fishing minigame."
+  (set! *chaos-active-list* *chaos-saved-active-list*)
+  (set! *chaos-pending-list* *chaos-saved-pending-list*)
+  (set! *chaos-next-frame* *chaos-saved-next-frame*)
+  (set! *chaos-enabled?* *chaos-saved-enabled?*)
+  (set! *chaos-minigame-paused?* #f)
+  0)
 
 
 (set! (-> *chaos-effect-list* 0) 'big-head)
@@ -301,6 +382,24 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 (set! (-> *chaos-effect-list* 107) 'life-hurt-1)
 (set! (-> *chaos-effect-list* 108) 'life-hurt-3)
 (set! (-> *chaos-effect-list* 109) 'instant-crash)
+(set! (-> *chaos-effect-list* 110) 'moon-gravity)
+(set! (-> *chaos-effect-list* 111) 'heavy-gravity)
+(set! (-> *chaos-effect-list* 112) 'windy)
+(set! (-> *chaos-effect-list* 113) 'strong-wind)
+(set! (-> *chaos-effect-list* 114) 'earthquake)
+(set! (-> *chaos-effect-list* 115) 'popcorn-jak)
+(set! (-> *chaos-effect-list* 116) 'orb-fountain)
+(set! (-> *chaos-effect-list* 117) 'orb-trail)
+(set! (-> *chaos-effect-list* 118) 'cinematic-mode)
+(set! (-> *chaos-effect-list* 119) 'blink)
+(set! (-> *chaos-effect-list* 120) 'no-look-challenge)
+(set! (-> *chaos-effect-list* 121) 'pancake-jak)
+(set! (-> *chaos-effect-list* 122) 'tower-jak)
+(set! (-> *chaos-effect-list* 123) 'wide-jak)
+(set! (-> *chaos-effect-list* 124) 'pinball-jak)
+(set! (-> *chaos-effect-list* 125) 'everything-weird)
+(set! (-> *chaos-effect-list* 126) 'slot-machine)
+;(set! (-> *chaos-effect-list* 127) 'heartbeat)
 (chaos-update-selected-effect)
 
 
@@ -316,7 +415,10 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
              (eff (the symbol (car use-pe))))
         (when (case eff
                 (('weather-thunder 'weather-dark 'weather-rain 'weather-snow 'weather-default
-                  'tod-dawn 'tod-morning 'tod-noon 'tod-afternoon 'tod-evening 'tod-night 'tod-random) #t)
+                  'tod-dawn 'tod-morning 'tod-noon 'tod-afternoon 'tod-evening 'tod-night 'tod-random
+                  'storm-jump 'snowball-fight 'midnight-snack 'sunrise-surprise
+                  'night-storm 'snow-day 'swamp-night 'boss-weather 'golden-thunder
+                  'blizzard-noon 'darkest-hour 'cozy-morning 'random-scene 'weather-wheel) #t)
                 (else #f))
           (return #t)))))
   #f)
@@ -405,17 +507,186 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
       (set! (-> fact health-pickup-time) (seconds 0))))
   0)
 
-(defun chaos-do-kill ()
+(defun chaos-random-weather ()
+  (case (rand-vu-int-range 0 3)
+    ((0) (thunderTime))
+    ((1) (DarkesetGlitchTime))
+    ((2) (rainyTime))
+    ((3) (snowingTime))
+    (else (chaosDefaultWeatherTime)))
+  0)
+
+(defun chaos-random-time-of-day ()
+  (set-time-of-day (rand-vu-float-range 0.0 24.0))
+  0)
+
+(defun chaos-random-scene ()
+  (chaos-random-weather)
+  (chaos-random-time-of-day)
+  0)
+
+(defun chaos-random-eco ()
+  (case (rand-vu-int-range 0 3)
+    ((0) (chaos-apply-cheat (pc-cheats eco-blue)))
+    ((1) (chaos-apply-cheat (pc-cheats eco-red)))
+    ((2) (chaos-apply-cheat (pc-cheats eco-green)))
+    ((3) (chaos-apply-cheat (pc-cheats eco-yellow)))
+    (else 0))
+  0)
+
+(defun chaos-set-random-life ()
+  (chaos-set-life (rand-vu-float-range 1.0 (chaos-health-max)))
+  0)
+
+(defun chaos-good-day ()
+  (chaos-add-life 2.0)
+  (chaos-add-orbs 100.0)
+  (chaos-spawn-money-burst 20 10.0)
+  (set-time-of-day 9.0)
+  0)
+
+(defun chaos-bad-day ()
+  (chaos-add-life -2.0)
+  (chaos-add-orbs -100.0)
+  (chaos-teleport-random 20.0 60.0)
+  (DarkesetGlitchTime)
+  0)
+
+(defun chaos-set-gravity ((amount float))
   (when *target*
-    (send-event *target* 'attack-invinc #f (static-attack-info ((mode 'instant-death)))))
+    (set! (-> *target* control dynam gravity-max) amount)
+    (set! (-> *target* control dynam gravity-length) amount))
   0)
 
-
-(defun chaos-do-crash ()
-  (when *chaos-crash-enabled?*
-    (format 0 "CHAOS CRASH~%")
-    (set! (-> (the (pointer int) 0) 0) #x1337))
+(defun chaos-reset-target-physics ()
+  (when *target*
+    (set! (-> *target* control dynam gravity-max) (-> *target* control unknown-dynamics00 gravity-max))
+    (set! (-> *target* control dynam gravity-length) (-> *target* control unknown-dynamics00 gravity-length))
+    (vector-identity! (-> *target* root scale))
+    (vector-identity! (-> *target* control scale)))
   0)
+
+(defun chaos-add-velocity ((dx float) (dy float) (dz float))
+  (when *target*
+    (+! (-> *target* control transv x) dx)
+    (+! (-> *target* control transv y) dy)
+    (+! (-> *target* control transv z) dz))
+  0)
+
+(defun chaos-pinball-bounce ((ticks int))
+  (when (and *target* (> (- ticks *chaos-pinball-last-bounce*) 12))
+    (when (logtest? (-> *target* control status) (cshape-moving-flags onground))
+        (set! *chaos-pinball-last-bounce* ticks)
+        (set! (-> *target* control transv y) 20480.0)
+        (chaos-add-velocity
+          (rand-vu-float-range -49152.0 49152.0)
+          0.0
+          (rand-vu-float-range -49152.0 49152.0))))
+  0)
+
+(defun chaos-set-target-scale ((sx float) (sy float) (sz float))
+  (when *target*
+    (set-vector! (-> *target* root scale) sx sy sz 1.0)
+    (set-vector! (-> *target* control scale) sx sy sz 1.0))
+  0)
+
+(defun chaos-jitter-target ((amount float))
+  (when *target*
+    (let ((pos (target-pos 0)))
+      (+! (-> pos x) (rand-vu-float-range (* -1.0 amount) amount))
+      (+! (-> pos y) (rand-vu-float-range (* -1.0 amount) amount))
+      (+! (-> pos z) (rand-vu-float-range (* -1.0 amount) amount))))
+  0)
+
+(defun chaos-rumble ((ticks int) (strength int))
+  (when (zero? (mod ticks 12))
+    (cpad-set-buzz! (-> *cpad-list* cpads 0) 0 strength (seconds 0.12)))
+  0)
+
+(defun chaos-slot-machine ()
+  (case (rand-vu-int-range 0 5)
+    ((0) (chaos-set-life (chaos-health-max)))
+    ((1) (chaos-set-life 1.0))
+    ((2) (chaos-add-orbs 250.0))
+    ((3) (chaos-add-orbs -250.0))
+    ((4) (chaos-spawn-money-burst 70 12.0))
+    ((5) (chaos-teleport-random 80.0 180.0))
+    (else 0))
+  0)
+
+(defun chaos-active-mechanic? ((effect symbol))
+  (case effect
+    (('moon-gravity 'heavy-gravity
+      'windy 'strong-wind
+      'earthquake 'orb-fountain 'orb-trail
+      'cinematic-mode 'blink 'no-look-challenge
+      'pancake-jak 'tower-jak 'wide-jak 'pinball-jak #|'heartbeat|#) #t)
+    (else #f)))
+
+(defun chaos-draw-cinematic-bars ()
+  (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf))
+                               (bucket-id debug-no-zbuf))
+    ;; Top/bottom plus side masks make the frame feel vertically and horizontally compressed.
+    (draw-sprite2d-xy buf 0 0 512 42 (new 'static 'rgba :a #xff))
+    (draw-sprite2d-xy buf 0 182 512 42 (new 'static 'rgba :a #xff))
+    (draw-sprite2d-xy buf 0 42 44 140 (new 'static 'rgba :a #xd0))
+    (draw-sprite2d-xy buf 468 42 44 140 (new 'static 'rgba :a #xd0)))
+  0)
+
+(defun chaos-run-active-mechanic ((effect symbol) (ticks int))
+  (case effect
+    (('moon-gravity)
+     (chaos-set-gravity 20480.0))
+    (('heavy-gravity)
+     (chaos-set-gravity 737280.0))
+    (('windy)
+     (chaos-add-velocity 3096.0 0.0 2048.0))
+    (('strong-wind)
+     (chaos-add-velocity 6144.0 0.0 4096.0))
+    (('earthquake)
+     (chaos-jitter-target 1024.0)
+     (chaos-rumble ticks 75))
+    (('orb-fountain)
+     (when (zero? (mod ticks 20))
+       (chaos-spawn-money-burst 5 5.0)))
+    (('orb-trail)
+     (when (zero? (mod ticks 10))
+       (chaos-spawn-money-burst 1 1.5)))
+    (('cinematic-mode)
+     (set-letterbox-frames (seconds 0.2))
+     (chaos-draw-cinematic-bars))
+    (('blink)
+     (set-blackout-frames (seconds 0.2)))
+    (('no-look-challenge)
+     (when *target*
+       (set! (-> *target* no-look-around-wait) (+ (current-time) (seconds 0.2)))))
+    (('pancake-jak)
+     (chaos-set-target-scale 1.8 0.35 1.8))
+    (('tower-jak)
+     (chaos-set-target-scale 0.7 2.2 0.7))
+    (('wide-jak)
+     (chaos-set-target-scale 2.5 1.0 0.65))
+    (('pinball-jak)
+     (when (zero? (mod ticks 8))
+       (chaos-add-velocity (rand-vu-float-range -8192.0 8192.0) 0.0 (rand-vu-float-range -8192.0 8192.0)))
+     (chaos-pinball-bounce ticks))
+    ;(('heartbeat)
+    ; (chaos-rumble ticks 100)
+    ; (when (< (mod ticks 50) 8)
+    ;   (set-blackout-frames (seconds 0.5))))
+    (else 0))
+  0)
+
+(defun chaos-run-active-mechanics ((ticks int))
+  (dolist (entry *chaos-active-list*)
+    (when (pair? entry)
+      (let* ((pe (the pair entry))
+             (use-pe (the pair (if (pair? (car pe)) (car pe) pe)))
+             (effect (the symbol (car use-pe))))
+        (when (chaos-active-mechanic? effect)
+          (chaos-run-active-mechanic effect ticks)))))
+  0)
+
 
 (defun chaos-schedule-delayed ((effect symbol) (frame int) (delay-sec float))
   (let ((trigger (+ frame (chaos-seconds->frames delay-sec))))
@@ -452,16 +723,7 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 
 (defun chaos-fake-crash-active? ((ticks int))
   (< ticks *chaos-fake-crash-until*))
-
-(defun chaos-end-fake-crash ()
-  (when *chaos-fake-crash-paused?*
-    (set! *chaos-fake-crash-paused?* #f)
-    (when *setting-control*
-      (set! (-> *setting-control* default process-mask) *chaos-fake-crash-prev-mask*)
-      (apply-settings *setting-control*)))
-  0)
-
-(defun chaos-draw-fake-crash ()
+ (defun chaos-draw-fake-crash ()
   0)
 
 (defun chaos-apply-effect ((effect symbol) (frame int))
@@ -743,7 +1005,7 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
      (snowingTime))
     (('weather-default)
      ;; WEATHER DEFAULT
-     (defaultWeatherTime))
+     (chaosDefaultWeatherTime))
     (('tod-dawn)
      ;; TOD DAWN
      (set-time-of-day 6.0))
@@ -795,6 +1057,189 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
     (('life-hurt-3)
      ;; LIFE HURT 3
      (chaos-add-life -3.0))
+    (('jackpot-jump)
+     (chaos-teleport-offset 0.0 12.0 0.0)
+     (chaos-spawn-money-burst 30 10.0))
+    (('orb-bomb)
+     (chaos-spawn-money-burst 60 4.0)
+     (chaos-add-life -1.0))
+    (('skyfall-payout)
+     (chaos-teleport-offset 0.0 20.0 0.0)
+     (chaos-add-orbs 150.0))
+    (('buried-treasure)
+     (chaos-teleport-offset 0.0 -3.0 0.0)
+     (chaos-spawn-money-burst 40 8.0))
+    (('panic-hop)
+     (chaos-teleport-random 8.0 18.0)
+     (chaos-teleport-offset 0.0 8.0 0.0))
+    (('coin-flip-health)
+     (if (= (rand-vu-int-range 0 1) 0)
+         (chaos-set-life (chaos-health-max))
+         (chaos-set-life 1.0)))
+    (('coin-flip-orbs)
+     (if (= (rand-vu-int-range 0 1) 0)
+         (chaos-mul-orbs 2.0)
+         (chaos-mul-orbs 0.5)))
+    (('gamblers-teleport)
+     (if (= (rand-vu-int-range 0 1) 0)
+         (chaos-teleport-random 5.0 25.0)
+         (chaos-teleport-random 80.0 160.0)))
+    (('orb-tax-refund)
+     (chaos-add-orbs -75.0)
+     (chaos-spawn-money-burst 25 12.0))
+    (('health-swap)
+     (if (> (rand-vu-float-range 0.0 1.0) 0.5)
+         (chaos-add-life 3.0)
+         (chaos-add-life -3.0)))
+    (('poor-and-lost)
+     (chaos-add-orbs -150.0)
+     (chaos-teleport-random 40.0 90.0))
+    (('rich-and-lost)
+     (chaos-add-orbs 200.0)
+     (chaos-teleport-random 40.0 90.0))
+    (('tiny-vacation)
+     (chaos-teleport-random 10.0 30.0)
+     (set-time-of-day 15.0))
+    (('long-vacation)
+     (chaos-teleport-random 100.0 200.0)
+     (set-time-of-day 18.0))
+    (('bounce-east)
+     (chaos-teleport-offset 25.0 10.0 0.0))
+    (('bounce-west)
+     (chaos-teleport-offset -25.0 10.0 0.0))
+    (('storm-jump)
+     (thunderTime)
+     (chaos-teleport-offset 0.0 15.0 0.0))
+    (('snowball-fight)
+     (snowingTime)
+     (chaos-spawn-money-burst 20 18.0))
+    (('midnight-snack)
+     (set-time-of-day 0.0)
+     (chaos-add-life 1.0)
+     (chaos-add-orbs 25.0))
+    (('sunrise-surprise)
+     (set-time-of-day 6.0)
+     (chaos-teleport-random 20.0 50.0)
+     (chaos-spawn-money-burst 15 8.0))
+    (('night-storm)
+     (thunderTime)
+     (set-time-of-day 0.0))
+    (('snow-day)
+     (snowingTime)
+     (set-time-of-day 9.0))
+    (('swamp-night)
+     (rainyTime)
+     (set-time-of-day 0.0))
+    (('boss-weather)
+     (DarkesetGlitchTime)
+     (set-time-of-day 18.0))
+    (('golden-thunder)
+     (thunderTime)
+     (set-time-of-day 18.0))
+    (('blizzard-noon)
+     (snowingTime)
+     (set-time-of-day 12.0))
+    (('darkest-hour)
+     (DarkesetGlitchTime)
+     (set-time-of-day 0.0))
+    (('cozy-morning)
+     (chaosDefaultWeatherTime)
+     (set-time-of-day 9.0))
+    (('random-scene)
+     (chaos-random-scene))
+    (('weather-wheel)
+     (chaos-random-weather))
+    (('blue-mirror)
+     (chaos-apply-cheat (pc-cheats eco-blue mirror)))
+    (('red-rage)
+     (chaos-apply-cheat (pc-cheats eco-red big-fist)))
+    (('green-giant)
+     (chaos-apply-cheat (pc-cheats eco-green huge-head)))
+    (('yellow-fists)
+     (chaos-apply-cheat (pc-cheats eco-yellow big-fist)))
+    (('tiny-mirror)
+     (chaos-apply-cheat (pc-cheats small-head mirror)))
+    (('huge-hero)
+     (chaos-apply-cheat (pc-cheats huge-head hero-mode)))
+    (('texture-party)
+     (chaos-apply-cheat (pc-cheats no-tex tunes)))
+    (('blue-daxter-day)
+     (chaos-apply-cheat (pc-cheats sidekick-blue eco-blue)))
+    (('hard-mode-lite)
+     (chaos-apply-cheat (pc-cheats hard-rats hero-mode)))
+    (('everything-weird)
+     (chaos-apply-cheat (pc-cheats mirror no-tex huge-head big-head-npc)))
+    (('mercy-button)
+     (chaos-set-life (chaos-health-max))
+     (chaos-add-orbs 50.0)
+     (chaosDefaultWeatherTime))
+    (('danger-button)
+     (chaos-set-life 1.0)
+     (chaos-teleport-random 40.0 120.0)
+     (DarkesetGlitchTime))
+    (('orb-cleanse)
+     (chaos-set-orbs 0.0)
+     (chaos-spawn-money-burst 50 20.0))
+    (('cell-gift)
+     (chaos-add-cells 1.0)
+     (chaos-add-orbs 50.0))
+    (('cell-lottery)
+     (case (rand-vu-int-range 0 3)
+       ((0) (chaos-add-cells 0.0))
+       ((1) (chaos-add-cells 1.0))
+       ((2) (chaos-add-cells 2.0))
+       ((3) (chaos-add-cells 3.0))
+       (else 0)))
+    (('health-lottery)
+     (chaos-set-random-life))
+    (('chaos-refresh)
+     (chaos-reset-visuals)
+     (chaos-set-life (chaos-health-max)))
+    (('free-sample-plate)
+     (chaos-add-orbs 25.0)
+     (chaos-add-life 1.0)
+     (chaos-spawn-money-burst 10 6.0))
+    (('bad-day)
+     (chaos-bad-day))
+    (('good-day)
+     (chaos-good-day))
+    (('moon-gravity)
+     (chaos-set-gravity 20480.0))
+    (('heavy-gravity)
+     (chaos-set-gravity 737280.0))
+    (('windy)
+     (chaos-add-velocity 20480.0 0.0 10240.0))
+    (('strong-wind)
+     (chaos-add-velocity 61440.0 0.0 40960.0))
+    (('earthquake)
+     (chaos-rumble frame 75))
+    (('popcorn-jak)
+     (chaos-add-velocity 0.0 73728.0 0.0))
+    (('orb-fountain)
+     (chaos-spawn-money-burst 15 5.0))
+    (('orb-trail)
+     (chaos-spawn-money-burst 5 2.0))
+    (('cinematic-mode)
+     (set-letterbox-frames (seconds 0.2))
+     (chaos-draw-cinematic-bars))
+    (('blink)
+     (set-blackout-frames (seconds 0.2)))
+    (('no-look-challenge)
+     (when *target*
+       (set! (-> *target* no-look-around-wait) (+ (current-time) (seconds 0.2)))))
+    (('pancake-jak)
+     (chaos-set-target-scale 1.8 0.35 1.8))
+    (('tower-jak)
+     (chaos-set-target-scale 0.7 2.2 0.7))
+    (('wide-jak)
+     (chaos-set-target-scale 2.5 1.0 0.65))
+    (('pinball-jak)
+     (set! *chaos-pinball-last-bounce* frame)
+     (chaos-add-velocity (rand-vu-float-range -32768.0 32768.0) 0.0 (rand-vu-float-range -32768.0 32768.0)))
+    ;(('heartbeat)
+    ; (chaos-rumble frame 100))
+    (('slot-machine)
+     (chaos-slot-machine))
     (else 0))
   0)
 
@@ -802,6 +1247,12 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 (defun chaos-effect-allowed? ((effect symbol))
   (cond
     ((eq? effect 'crash-delay) *chaos-crash-enabled?*)
+    ;; Reject softlock-causing powercell removal effects
+    ((eq? effect 'cells-sub-1) #f)
+    ((eq? effect 'cells-sub-2) #f)
+    ((eq? effect 'cells-sub-3) #f)
+    ((eq? effect 'cells-set-0) #f)
+    ((eq? effect 'cells-half) #f)
     (else #t)))
 
 (defun chaos-pick-effect ()
@@ -848,6 +1299,17 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
     (('tod-night) CHAOS_DUR_SKY)
     (('tod-random) CHAOS_DUR_SKY)
     (('collision-on) CHAOS_DUR_XRAY)
+    (('storm-jump 'snowball-fight 'midnight-snack 'sunrise-surprise
+      'night-storm 'snow-day 'swamp-night 'boss-weather 'golden-thunder
+      'blizzard-noon 'darkest-hour 'cozy-morning 'random-scene 'weather-wheel) CHAOS_DUR_DWEATHER)
+    (('blue-mirror 'red-rage 'green-giant 'yellow-fists 'tiny-mirror
+      'huge-hero 'texture-party 'blue-daxter-day 'hard-mode-lite 'everything-weird) CHAOS_DURATION_SEC)
+    (('blink) CHAOS_WARN_SEC)
+    (('moon-gravity 'heavy-gravity
+      'windy 'strong-wind
+      'earthquake 'orb-fountain 'orb-trail
+      'cinematic-mode 'no-look-challenge
+      'pancake-jak 'tower-jak 'wide-jak 'pinball-jak #|'heartbeat|#) CHAOS_DURATION_SEC)
     (else CHAOS_DUR_ONE_SHOT)))
 
 
@@ -859,7 +1321,17 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
       'sidekick-blue 'tunes 'sky 'big-fist 'hard-rats
       'hero-mode 'huge-head 'big-head-npc 'oh-my-goodness
       'weather-thunder 'weather-dark 'weather-rain 'weather-snow 'weather-default
-      'tod-dawn 'tod-morning 'tod-noon 'tod-afternoon 'tod-evening 'tod-night 'tod-random 'collision-on) #t)
+      'tod-dawn 'tod-morning 'tod-noon 'tod-afternoon 'tod-evening 'tod-night 'tod-random 'collision-on
+      'storm-jump 'snowball-fight 'midnight-snack 'sunrise-surprise
+      'night-storm 'snow-day 'swamp-night 'boss-weather 'golden-thunder
+      'blizzard-noon 'darkest-hour 'cozy-morning 'random-scene 'weather-wheel
+      'blue-mirror 'red-rage 'green-giant 'yellow-fists 'tiny-mirror
+      'huge-hero 'texture-party 'blue-daxter-day 'hard-mode-lite 'everything-weird
+      'moon-gravity 'heavy-gravity
+      'windy 'strong-wind
+      'earthquake 'orb-fountain 'orb-trail
+      'cinematic-mode 'blink 'no-look-challenge
+      'pancake-jak 'tower-jak 'wide-jak 'pinball-jak #|'heartbeat|#) #t)
     (else #f)))
 
 (defun chaos-reapply-all ()
@@ -893,7 +1365,7 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
           (('weather-dark) (DarkesetGlitchTime))
           (('weather-rain) (rainyTime))
           (('weather-snow) (snowingTime))
-          (('weather-default) (defaultWeatherTime))
+          (('weather-default) (chaosDefaultWeatherTime))
           (('tod-dawn) (set-time-of-day 6.0))
           (('tod-morning) (set-time-of-day 9.0))
           (('tod-noon) (set-time-of-day 12.0))
@@ -902,6 +1374,30 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
           (('tod-night) (set-time-of-day 0.0))
           (('tod-random) (set-time-of-day (rand-vu-float-range 0.0 24.0)))
           (('collision-on) (turnonCollisionmode))
+          (('storm-jump) (thunderTime))
+          (('snowball-fight) (snowingTime))
+          (('midnight-snack) (set-time-of-day 0.0))
+          (('sunrise-surprise) (set-time-of-day 6.0))
+          (('night-storm) (thunderTime) (set-time-of-day 0.0))
+          (('snow-day) (snowingTime) (set-time-of-day 9.0))
+          (('swamp-night) (rainyTime) (set-time-of-day 0.0))
+          (('boss-weather) (DarkesetGlitchTime) (set-time-of-day 18.0))
+          (('golden-thunder) (thunderTime) (set-time-of-day 18.0))
+          (('blizzard-noon) (snowingTime) (set-time-of-day 12.0))
+          (('darkest-hour) (DarkesetGlitchTime) (set-time-of-day 0.0))
+          (('cozy-morning) (chaosDefaultWeatherTime) (set-time-of-day 9.0))
+          (('random-scene) (chaos-random-scene))
+          (('weather-wheel) (chaos-random-weather))
+          (('blue-mirror) (chaos-apply-cheat (pc-cheats eco-blue mirror)))
+          (('red-rage) (chaos-apply-cheat (pc-cheats eco-red big-fist)))
+          (('green-giant) (chaos-apply-cheat (pc-cheats eco-green huge-head)))
+          (('yellow-fists) (chaos-apply-cheat (pc-cheats eco-yellow big-fist)))
+          (('tiny-mirror) (chaos-apply-cheat (pc-cheats small-head mirror)))
+          (('huge-hero) (chaos-apply-cheat (pc-cheats huge-head hero-mode)))
+          (('texture-party) (chaos-apply-cheat (pc-cheats no-tex tunes)))
+          (('blue-daxter-day) (chaos-apply-cheat (pc-cheats sidekick-blue eco-blue)))
+          (('hard-mode-lite) (chaos-apply-cheat (pc-cheats hard-rats hero-mode)))
+          (('everything-weird) (chaos-apply-cheat (pc-cheats mirror no-tex huge-head big-head-npc)))
           ))))0)
 
 (defun chaos-start-effect-permanent ((effect symbol) (frame int))
@@ -973,9 +1469,10 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
   *chaos-menu-open?*)
 
 (defun chaos-menu-toggle ()
-  (set! *chaos-show-hint* #f)
   (set! *chaos-menu-open?* (not *chaos-menu-open?*))
   (when *chaos-menu-open?*
+    (set! *chaos-show-hint* #f)
+    (set! *chaos-ui-hidden?* #f)
     (set! *chaos-menu-mode* 'main)
     (set! *chaos-main-index* 0))
   ;; keep selection in-bounds for effects submenu
@@ -1166,6 +1663,15 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
   (when (not *pc-settings*)
     (return 0))
 
+  ;; Detect fishing minigame state
+  (if *target*
+      (let ((target-state (-> *target* state)))
+        (if (and target-state (eq? (-> target-state name) 'target-fishing))
+            (when (not *chaos-minigame-paused?*)
+              (chaos-pause-for-minigame))
+            (when *chaos-minigame-paused?*
+              (chaos-resume-after-minigame)))))
+
   ;; remember tick count for functions that don't take args
   (set! *chaos-last-ticks* ticks)
   ;; Delayed startup clear: run once after pc-settings exists (spawn/init timing).
@@ -1180,6 +1686,9 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
 
   ;; Run delayed actions
   (chaos-run-pending ticks)
+
+  ;; Run active mechanics that need to push the game every frame.
+  (chaos-run-active-mechanics ticks)
 
   ;; Remove expired effects, but keep one-shot effects visible for a bit
   (let ((new-list '())
@@ -1210,6 +1719,8 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
                     (chaos-do-crash))
                   (when (eq? effect 'collision-on)
                     (turnoffCollisionmode))
+                  (when (chaos-active-mechanic? effect)
+                    (chaos-reset-target-physics))
                   (set! changed? #t))))
           (set! changed? #t)))
     (when changed?
@@ -1318,10 +1829,13 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
       ))
   (none))
 
+
 (defun runs-on-jak-spawn ()
   ;; Code here runs every time jak spawns (loading a file new game or death)
   ;; We defer the hard clear until chaos-update, because *pc-settings* may not exist yet here.
   (set! *chaos-startup-clear-pending?* #t)
+  (chaos-reset-weather-state)
+  (chaos-save-weather-state)
   ;; still wipe chaos lists immediately (these are our own globals, safe to clear now)
   (set! *chaos-active-list* '())
   (set! *chaos-pending-list* '())
@@ -1337,7 +1851,8 @@ Also reschedule the next random effect so clearing doesn't instantly trigger a n
      )
     (('blackout)
      ;; Code here runs after jak dies (and any death cutscene finishes), during the blackout before he spawns
-     ))
+     ;; Clear all active chaos effects to prevent rendering/visual effects from persisting after death
+     (chaos-clear-all)))
   (none))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;

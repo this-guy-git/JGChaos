@@ -40,7 +40,7 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 (define-extern *chaos-enabled?* symbol)
 (define-extern *chaos-selected-effect* symbol)
 
-(defconstant *wm* "J1GCHAOS V0.02.3")
+(defconstant *wm* "J1GCHAOS V0.03.0")
 (defconstant *author* "BY THIS GUY")
 
 ;; took far too long to find these coords
@@ -173,7 +173,7 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
     (('spawn-orbs-wide-50) "Orb Supernova")
     
     ;; Weather effects
-    (('weather-thunder) "Thunder & Lightning")
+    (('weather-thunder) "Thunder and Lightning")
     (('weather-dark) "Lights Out")
     (('weather-rain) "Rainy Day")
     (('weather-snow) "Winter Wonderland")
@@ -201,6 +201,28 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
     (('life-heal-1) "Healing Factor")
     (('life-hurt-1) "Ouch!")
     (('life-hurt-3) "Big Owie")
+
+    ;; Random
+    (('everything-weird) "Everything Weird")
+
+    ;; Movement and ui stuff
+    (('moon-gravity) "Moon Gravity")
+    (('heavy-gravity) "Anvil Gravity")
+    (('windy) "Windy")
+    (('strong-wind) "Strong Wind")
+    (('earthquake) "Earthquake")
+    (('popcorn-jak) "Popcorn Jak")
+    (('orb-fountain) "Orb Fountain")
+    (('orb-trail) "Orb Trail")
+    (('cinematic-mode) "Cinematic Mode")
+    (('blink) "Blink")
+    (('no-look-challenge) "No Look Challenge")
+    (('pancake-jak) "Pancake Jak")
+    (('tower-jak) "Tower Jak")
+    (('wide-jak) "Wide Jak")
+    (('pinball-jak) "Pinball Jak")
+    ;(('heartbeat) "Heartbeat")
+    (('slot-machine) "Slot Machine")
     
     ;; Dangerous effects
     (('kill-delay) "Death Sentence")
@@ -575,30 +597,68 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
   (set! *collision-renderer* #f)
   (logior! *vu1-enable-user-menu* (vu1-renderer-mask tfrag trans-tfrag tie tie-near)))
 
+(define *chaos-weather-state-saved?* #f)
+(define *chaos-weather-saved-mood-fn* (the-as (function mood-context float int none) #f))
+(define *chaos-weather-saved-mood-context* (the-as mood-context #f))
+
+(defun chaos-save-weather-state ()
+  (when (and *level* (not *chaos-weather-state-saved?*))
+    (let ((level-data (level-get-target-inside *level*)))
+      (when level-data
+        (set! *chaos-weather-saved-mood-fn* (-> level-data mood-func))
+        (set! *chaos-weather-saved-mood-context* (-> level-data mood))
+        (set! *chaos-weather-state-saved?* #t))))
+  0)
+
+(defun chaos-restore-weather-state ()
+  (when (and *level* *chaos-weather-state-saved?*)
+    (let ((level-data (level-get-target-inside *level*)))
+      (when level-data
+        (set! (-> level-data mood-func) *chaos-weather-saved-mood-fn*)
+        (set! (-> level-data mood) *chaos-weather-saved-mood-context*)))
+    (set! *chaos-weather-state-saved?* #f)
+    (set! *chaos-weather-saved-mood-fn* (the-as (function mood-context float int none) #f))
+    (set! *chaos-weather-saved-mood-context* (the-as mood-context #f)))
+  0)
+
+(defun chaos-reset-weather-state ()
+  (set! *chaos-weather-state-saved?* #f)
+  (set! *chaos-weather-saved-mood-fn* (the-as (function mood-context float int none) #f))
+  (set! *chaos-weather-saved-mood-context* (the-as mood-context #f))
+  0)
+
 ;;This makes it thunder in the current level
 (defun thunderTime ()
+  (chaos-save-weather-state)
   (set! (-> (level-get-target-inside *level*) mood-func) update-mood-village2)
   (set! (-> (level-get-target-inside *level*) mood) *village2-mood*))
 
 ;;This makes the current level dark when called
 (defun DarkesetGlitchTime ()
+  (chaos-save-weather-state)
   (set! (-> (level-get-target-inside *level*) mood-func) update-mood-finalboss)
   (set! (-> (level-get-target-inside *level*) mood) *finalboss-mood*))
 
 ;;This needs fixed
 (defun rainyTime ()
+  (chaos-save-weather-state)
   (set! (-> (level-get-target-inside *level*) mood-func) update-mood-swamp)
   (set! (-> (level-get-target-inside *level*) mood) *swamp-mood*))
 
 ;;This needs fixed
 (defun snowingTime ()
+  (chaos-save-weather-state)
   (set! (-> (level-get-target-inside *level*) mood-func) update-mood-snow)
   (set! (-> (level-get-target-inside *level*) mood) *snow-mood*))
 
-;;This makes the current levels weather the same as village1
-(defun defaultWeatherTime ()
-  (set! (-> (level-get-target-inside *level*) mood-func) update-mood-village1)
-  (set! (-> (level-get-target-inside *level*) mood) *village1-mood*))
+;;Restore the weather/mood that was active when chaos first captured state.
+(defun chaosDefaultWeatherTime ()
+  (if *chaos-weather-state-saved?*
+      (chaos-restore-weather-state)
+      (begin
+        (set! (-> (level-get-target-inside *level*) mood-func) update-mood-village1)
+        (set! (-> (level-get-target-inside *level*) mood) *village1-mood*)))
+  0)
 
 ;;This moves jak to a provided coordinate example call
 ;;(tp-jak 0.0 12.0 32.32)
