@@ -1,7 +1,7 @@
 ;;-*-Lisp-*-
 (in-package goal)
 
-;; --- Chaos runtime state (must be defined before functions use it) ---
+;; chaos runtime state
 (define *chaos-active-list* '()) ;; list of (effect . end-frame)
 (define *chaos-next-frame* 0)
 (define *chaos-startup-clear-pending?* #f) ;; set on spawn, handled in chaos-update when init is ready
@@ -14,7 +14,7 @@
 (define *chaos-fake-crash-paused?* #f)
 (define *chaos-fake-crash-prev-mask* (the-as process-mask 0))
 
-(define *chaos-last-ticks* 0) ;; updated each chaos-update; used for rescheduling after clear
+(define *chaos-last-ticks* 0) ;; updated each tick
 (define *chaos-minigame-paused?* #f)
 (define *chaos-saved-active-list* '())
 (define *chaos-saved-pending-list* '())
@@ -27,23 +27,22 @@
 ;; name in dgo: mod-custom-code
 ;; dgos: TODO
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; What is this file for.
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 #|
  This file contains function defenitions that are pre placed in the mod base,
-    so if you place custom code inside of these functions, it will exectue based on
-    the name of the function, for example, if you place (set! (-> *game-info* fuel) (+ (-> *game-info* fuel) 1))
-    to the function named runs-on-orb-pickup, then jaks powercell count will increase each time you collect
-    an orb
+  so if you place custom code inside of these functions, it will exectue based on
+  the name of the function, for example, if you place (set! (-> *game-info* fuel) (+ (-> *game-info* fuel) 1))
+  to the function named runs-on-orb-pickup, then jaks powercell count will increase each time you collect
+  an orb
 |#
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Begin function defintions.
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; Lightweight chaos system: periodic random effects using PC cheats with STACKING
 (define *chaos-interval-sec* 8)  ;; Time between new effects in seconds (adjustable)
 (defconstant CHAOS_DURATION_SEC 25.0)  ;; Default duration
 

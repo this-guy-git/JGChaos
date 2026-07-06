@@ -5,9 +5,9 @@
 ;; name in dgo: mod-common-functions
 ;; dgos: TODO
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; What is this file for.
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 #|
  This file is a place where you can define custom functions and GOAL code
@@ -15,9 +15,9 @@
  the powercell count by one when it is called
 |#
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Useful GOAL modding documentation
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 #|
 Checks the condition and if it is true it does first argument if false it does optional second argument
@@ -31,9 +31,9 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 (if (= (rand-vu-int-range 0 10) 1) (DANCE!) (Don't dance))
 |#
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Define Custom Variables to use in mods
-;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define-extern *chaos-active-list* pair) ;; from mod-custom-code.gc
 (define-extern *chaos-next-frame* int)
@@ -57,7 +57,7 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Names
+;; names
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun chaos-effect-display-name ((effect symbol))
@@ -235,7 +235,7 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Define Custom Functions to call in mods
+;; functions
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun draw-watermark ()
@@ -384,10 +384,10 @@ if the result of rand-vu-int-range is 1, then DANCE! if it is not 1, then Don't 
   (none))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Define Approved Custom Functions/Macros to call in all mods
+;; approved helpers
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; These are included with the mod base and you are welcome to use them in your mods!
+;; included helpers you can use in mods
 
 (defmacro current-checkpoint-name ()
   `(-> *game-info* current-continue name))
